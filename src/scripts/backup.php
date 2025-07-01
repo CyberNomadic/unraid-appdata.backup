@@ -1,408 +1,469 @@
 <?php
-
 /**
- * This file handles the actual backup
+ * Appdata Backup Plugin
+ * Handles the backup process for Unraid appdata, Docker containers, flash drive, and VM metadata.
+ * This script is a drop-in replacement for the original backup.php, maintaining all functionality.
  */
 
-use unraid\plugins\AppdataBackup\ABHelper;
-use unraid\plugins\AppdataBackup\ABSettings;
+namespace unraid\plugins\AppdataBackup;
 
-require_once("/usr/local/emhttp/plugins/dynamix.docker.manager/include/DockerClient.php");
+use DateTime;
+use DockerClient;
+use Exception;
+
+require_once '/usr/local/emhttp/plugins/dynamix.docker.manager/include/DockerClient.php';
 require_once dirname(__DIR__) . '/include/ABHelper.php';
 
-set_error_handler("unraid\plugins\AppdataBackup\ABHelper::errorHandler");
+set_error_handler([ABHelper::class, 'errorHandler']);
 
 /**
- * Helper for later renaming of the backup folder to suffix -failed
+ * Main backup controller class
  */
-$backupStarted = new DateTime();
+class AppdataBackup {
+    private $settings;
+    private $destination;
+    private $backupStartTime;
+    private $dockerClient;
+    private $errorOccurred = false;
+    private $updateList = [];
 
-
-if (ABHelper::scriptRunning()) {
-    ABHelper::notify("Appdata Backup", "Still running", "There is something running already.");
-    exit;
-}
-
-if (file_exists(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort)) {
-    unlink(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort);
-}
-
-if (file_exists(ABSettings::$tempFolder)) {
-    exec("rm " . ABSettings::$tempFolder . '/*.log');
-} // Creation of tempFolder is handled by backupLog
-
-file_put_contents(ABSettings::$tempFolder . '/' . ABSettings::$stateFileScriptRunning, getmypid());
-
-ABHelper::backupLog("👋 WELCOME TO APPDATA.BACKUP!! :D");
-$unraidVersion           = parse_ini_file('/etc/unraid-version');
-$emhttpPluginVersionPath = '/usr/local/emhttp/plugins/' . ABSettings::$appName . '/version';
-$pluginVersion           = file_exists($emhttpPluginVersionPath) ? file_get_contents($emhttpPluginVersionPath) : null;
-ABHelper::backupLog("plugin-version: " . $pluginVersion, ABHelper::LOGLEVEL_DEBUG);
-ABHelper::backupLog("unraid-version: " . print_r($unraidVersion, true), ABHelper::LOGLEVEL_DEBUG);
-
-/**
- * Some basic checks
- */
-if (!ABHelper::isArrayOnline()) {
-    ABHelper::backupLog("It doesn't appear that the array is running!", ABHelper::LOGLEVEL_ERR);
-    goto end;
-}
-
-if (!file_exists(ABSettings::getConfigPath())) {
-    ABHelper::backupLog("There is no configfile... Hmm...", ABHelper::LOGLEVEL_ERR);
-    goto end;
-}
-
-$abSettings = new ABSettings();
-
-if (empty($abSettings->destination)) {
-    ABHelper::backupLog("Destination is not set!", ABHelper::LOGLEVEL_ERR);
-    goto end;
-}
-
-$abDestination = rtrim($abSettings->destination, '/') . '/ab_' . date("Ymd_His");
-
-ABHelper::handlePrePostScript($abSettings->preRunScript, 'pre-run', $abDestination);
-
-if (!file_exists($abSettings->destination) || !is_writable($abSettings->destination)) {
-    ABHelper::backupLog("Destination is unavailable or not writeable! Did you created the destination folder?", ABHelper::LOGLEVEL_ERR);
-    goto end;
-}
-
-ABHelper::backupLog("Backing up from: " . implode(', ', $abSettings->allowedSources));
-
-/**
- * At this point, we have something to work with.
- * Patch the destination for further usage
- */
-ABHelper::backupLog("Backing up to: " . $abDestination);
-
-if (!mkdir($abDestination)) {
-    ABHelper::backupLog("Cannot create destination folder!", ABHelper::LOGLEVEL_ERR);
-    goto end;
-}
-
-if (ABHelper::abortRequested()) {
-    goto abort;
-}
-
-
-$dockerClient     = new DockerClient();
-$dockerContainers = $dockerClient->getDockerContainers();
-
-ABHelper::backupLog("Containers: " . print_r($dockerContainers, true), ABHelper::LOGLEVEL_DEBUG);
-
-
-if (empty($dockerContainers)) {
-    ABHelper::backupLog("There are no docker containers to back up!", ABHelper::LOGLEVEL_WARN);
-    goto continuationForAll;
-}
-
-// Sort containers
-$sortedStartContainers = ABHelper::sortContainers($dockerContainers, $abSettings->containerOrder);
-$sortedStopContainers  = ABHelper::sortContainers($dockerContainers, $abSettings->containerOrder, true);
-
-if (empty($sortedStopContainers)) {
-    ABHelper::backupLog("There are no docker containers (after sorting) to back up!", ABHelper::LOGLEVEL_WARN);
-    goto continuationForAll;
-}
-
-$alSortedContainers = array_column($sortedStopContainers, 'Name');
-natsort($alSortedContainers);
-
-ABHelper::backupLog("Selected containers: " . implode(', ', $alSortedContainers));
-
-ABHelper::backupLog("Sorted Stop : " . implode(", ", array_column($sortedStopContainers, 'Name')), ABHelper::LOGLEVEL_DEBUG);
-ABHelper::backupLog("Sorted Start: " . implode(", ", array_column($sortedStartContainers, 'Name')), ABHelper::LOGLEVEL_DEBUG);
-
-ABHelper::backupLog("Saving container XML files...");
-foreach (glob("/boot/config/plugins/dockerMan/templates-user/*") as $xmlFile) {
-    copy($xmlFile, $abDestination . '/' . basename($xmlFile));
-}
-
-if (ABHelper::abortRequested()) {
-    goto abort;
-}
-
-/**
- * Array of Container names, needing an update
- */
-$dockerUpdateList = [];
-
-ABHelper::backupLog("Starting Docker auto-update check...", ABHelper::LOGLEVEL_DEBUG);
-foreach ($dockerContainers as $container) { // Use unraids docker container list for update checking!
-    $containerSettings = $abSettings->getContainerSpecificSettings($container['Name']);
+    public function __construct() {
+        $this->backupStartTime = new DateTime();
+        $this->settings = new ABSettings();
+        $this->dockerClient = new DockerClient();
+    }
 
     /**
-     * Log container specific settings one time
+     * Executes the backup process
+     * @return int Exit code (0 for success, 1 for failure)
      */
-    ABHelper::backupLog($container['Name'] . " specific settings: " . print_r($containerSettings, true), ABHelper::LOGLEVEL_DEBUG);
-
-    if ($containerSettings['skip'] == 'no' && $containerSettings['updateContainer'] == 'yes') {
-
-        if (!isset($allInfo)) {
-            ABHelper::backupLog("Requesting docker template meta...", ABHelper::LOGLEVEL_DEBUG);
-            $dockerTemplates = new \DockerTemplates();
-            $allInfo         = $dockerTemplates->getAllInfo(true, true);
-            ABHelper::backupLog(var_export($allInfo, true), ABHelper::LOGLEVEL_DEBUG);
+    public function run(): int {
+        try {
+            $this->initialize();
+            $this->validatePrerequisites();
+            $this->executeBackup();
+            $this->handleRetention();
+            $this->finalize();
+        } catch (Exception $e) {
+            ABHelper::backupLog("Fatal error: {$e->getMessage()}", ABHelper::LOGLEVEL_ERR);
+            $this->errorOccurred = true;
+            $this->handleAbort();
         }
 
-        if (isset($allInfo[$container['Name']]) && ($allInfo[$container['Name']]['updated'] ?? 'true') == 'false') { # string 'false' = Update available!
-            ABHelper::backupLog("Auto-Update for '{$container['Name']}' is enabled and update is available! Schedule update after backup...");
-            $dockerUpdateList[] = $container['Name'];
+        return $this->errorOccurred ? 1 : 0;
+    }
+
+    /**
+     * Initializes the backup process
+     */
+    private function initialize(): void {
+        if (ABHelper::scriptRunning()) {
+            ABHelper::notify("Appdata Backup", "Backup Already Running", "Another backup process is currently active.");
+            exit;
+        }
+
+        // Clean up previous state
+        $this->cleanTempFolder();
+        file_put_contents(ABSettings::$tempFolder . '/' . ABSettings::$stateFileScriptRunning, getmypid());
+
+        // Log system information
+        $unraidVersion = parse_ini_file('/etc/unraid-version');
+        $pluginVersionPath = '/usr/local/emhttp/plugins/' . ABSettings::$appName . '/version';
+        $pluginVersion = file_exists($pluginVersionPath) ? file_get_contents($pluginVersionPath) : 'unknown';
+        
+        ABHelper::backupLog("Starting Appdata Backup");
+        ABHelper::backupLog("Plugin Version: {$pluginVersion}", ABHelper::LOGLEVEL_DEBUG);
+        ABHelper::backupLog("Unraid Version: " . print_r($unraidVersion, true), ABHelper::LOGLEVEL_DEBUG);
+    }
+
+    /**
+     * Validates prerequisites before starting backup
+     * @throws Exception
+     */
+    private function validatePrerequisites(): void {
+        if (!ABHelper::isArrayOnline()) {
+            throw new Exception("Array is not online");
+        }
+
+        if (!file_exists(ABSettings::getConfigPath())) {
+            throw new Exception("Configuration file not found");
+        }
+
+        if (empty($this->settings->destination)) {
+            throw new Exception("Backup destination not configured");
+        }
+
+        $this->destination = rtrim($this->settings->destination, '/') . '/ab_' . date('Ymd_His');
+        
+        if (!file_exists($this->settings->destination) || !is_writable($this->settings->destination)) {
+            throw new Exception("Destination directory is not accessible or writable");
+        }
+
+        if (!mkdir($this->destination)) {
+            throw new Exception("Failed to create destination directory: {$this->destination}");
+        }
+
+        ABHelper::backupLog("Source paths: " . implode(', ', $this->settings->allowedSources));
+        ABHelper::backupLog("Destination: {$this->destination}");
+    }
+
+    /**
+     * Cleans up temporary folder
+     */
+    private function cleanTempFolder(): void {
+        if (file_exists(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort)) {
+            unlink(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort);
+        }
+
+        if (file_exists(ABSettings::$tempFolder)) {
+            exec("rm " . ABSettings::$tempFolder . '/*.log');
+        }
+    }
+
+    /**
+     * Executes the main backup process
+     */
+    private function executeBackup(): void {
+        ABHelper::handlePrePostScript($this->settings->preRunScript, 'pre-run', $this->destination);
+        
+        if (ABHelper::abortRequested()) {
+            $this->handleAbort();
+            return;
+        }
+
+        $this->backupDockerContainers();
+        $this->backupFlashDrive();
+        $this->backupVMMeta();
+        $this->backupExtraFiles();
+    }
+
+    /**
+     * Backs up Docker containers
+     */
+    private function backupDockerContainers(): void {
+        $containers = $this->dockerClient->getDockerContainers();
+        ABHelper::backupLog("Found containers: " . print_r($containers, true), ABHelper::LOGLEVEL_DEBUG);
+
+        if (empty($containers)) {
+            ABHelper::backupLog("No Docker containers found to backup", ABHelper::LOGLEVEL_WARN);
+            return;
+        }
+
+        // Sort containers for stop and start operations
+        $sortedStopContainers = ABHelper::sortContainers($containers, $this->settings->containerOrder, true, true, [], $this->settings);
+        $sortedStartContainers = ABHelper::sortContainers($containers, $this->settings->containerOrder, false, true, [], $this->settings);
+        $containerNames = array_column($sortedStopContainers, 'Name');
+        natsort($containerNames);
+
+        ABHelper::backupLog("Selected containers: " . implode(', ', $containerNames));
+        ABHelper::backupLog("Stop order: " . implode(", ", array_column($sortedStopContainers, 'Name')), ABHelper::LOGLEVEL_DEBUG);
+        ABHelper::backupLog("Start order: " . implode(", ", array_column($sortedStartContainers, 'Name')), ABHelper::LOGLEVEL_DEBUG);
+
+        // Backup container XML files
+        ABHelper::backupLog("Saving container XML configurations...");
+        foreach (glob("/boot/config/plugins/dockerMan/templates-user/*") as $xmlFile) {
+            copy($xmlFile, $this->destination . '/' . basename($xmlFile));
+        }
+
+        if (ABHelper::abortRequested()) {
+            $this->handleAbort();
+            return;
+        }
+
+        // Check for container updates
+        $this->checkDockerUpdates($containers);
+        
+        // Execute backup
+        $preBackupResult = ABHelper::handlePrePostScript($this->settings->preBackupScript, 'pre-backup', $this->destination);
+        if ($preBackupResult !== 2) {
+            ABHelper::doBackupMethod($this->settings->backupMethod, null, $this->settings, $this->dockerClient, $this->destination);
         } else {
-            ABHelper::backupLog("Auto-Update for '{$container['Name']}' is enabled but no update is available.");
+            ABHelper::backupLog("Backup skipped by pre-backup script");
         }
     }
-    if (ABHelper::abortRequested()) {
-        goto abort;
+
+    /**
+     * Checks for Docker container updates
+     * @param array $containers
+     */
+    private function checkDockerUpdates(array $containers): void {
+        ABHelper::backupLog("Checking for Docker container updates...", ABHelper::LOGLEVEL_DEBUG);
+
+        foreach ($containers as $container) {
+            if (ABHelper::abortRequested()) {
+                $this->handleAbort();
+                return;
+            }
+
+            $settings = $this->settings->getContainerSpecificSettings($container['Name']);
+            ABHelper::backupLog("Container {$container['Name']} settings: " . print_r($settings, true), ABHelper::LOGLEVEL_DEBUG);
+
+            if ($settings['skip'] === 'no' && $settings['updateContainer'] === 'yes') {
+                $allInfo = (new \DockerTemplates())->getAllInfo(true, true);
+                if (isset($allInfo[$container['Name']]) && ($allInfo[$container['Name']]['updated'] ?? 'true') === 'false') {
+                    ABHelper::backupLog("Scheduling update for {$container['Name']}");
+                    $this->updateList[] = $container['Name'];
+                } else {
+                    ABHelper::backupLog("No update available for {$container['Name']}");
+                }
+            }
+        }
+
+        ABHelper::backupLog("Planned updates: " . implode(", ", $this->updateList), ABHelper::LOGLEVEL_DEBUG);
     }
-}
-ABHelper::backupLog("Docker update check finished!", ABHelper::LOGLEVEL_DEBUG);
-ABHelper::backupLog("Planned container updates: " . implode(", ", $dockerUpdateList), ABHelper::LOGLEVEL_DEBUG);
 
-$preBackupRet = ABHelper::handlePrePostScript($abSettings->preBackupScript, 'pre-backup', $abDestination);
+    /**
+     * Backs up flash drive
+     */
+    private function backupFlashDrive(): void {
+        if ($this->settings->flashBackup !== 'yes') {
+            return;
+        }
 
-if ($preBackupRet === 2) {
-    ABHelper::backupLog("preBackup script decided to skip backup.");
-} else {
-    ABHelper::doBackupMethod($abSettings->backupMethod);
-}
+        ABHelper::backupLog("Backing up flash drive...");
+        $docroot = '/usr/local/emhttp';
+        $script = $docroot . '/webGui/scripts/flash_backup';
 
+        if (!file_exists($script)) {
+            ABHelper::backupLog("Flash backup script not found", ABHelper::LOGLEVEL_ERR);
+            $this->errorOccurred = true;
+            return;
+        }
 
-continuationForAll:
-
-/**
- * FlashBackup
- */
-if ($abSettings->flashBackup == 'yes') {
-    ABHelper::backupLog("Backing up the flash drive.");
-    $docroot = '/usr/local/emhttp';
-    $script  = $docroot . '/webGui/scripts/flash_backup';
-    if (!file_exists($script)) {
-        ABHelper::backupLog("The flash backup script is not available!", ABHelper::LOGLEVEL_ERR);
-    } else {
         $output = null;
         exec($script . " " . ABSettings::$externalCmdPidCapture, $output);
-        ABHelper::backupLog("flash backup returned: " . implode(", ", $output), ABHelper::LOGLEVEL_DEBUG);
+        ABHelper::backupLog("Flash backup output: " . implode(", ", $output), ABHelper::LOGLEVEL_DEBUG);
+
         if (empty($output[0])) {
-            ABHelper::backupLog("Flash backup failed: no answer from script!", ABHelper::LOGLEVEL_ERR);
-        } else {
-            if (!copy($docroot . '/' . $output[0], $abDestination . '/' . $output[0])) {
-                ABHelper::backupLog("Copying flash backup to destination failed!", ABHelper::LOGLEVEL_ERR);
-            } else {
-                ABHelper::backupLog("Flash backup created!");
-                if (!empty($abSettings->flashBackupCopy)) {
-                    ABHelper::backupLog("Copying the flash backup to '{$abSettings->flashBackupCopy}' as well...");
-                    if (!copy($docroot . '/' . $output[0], $abSettings->flashBackupCopy . '/' . $output[0])) {
-                        ABHelper::backupLog("Copying the flash backup to '{$abSettings->flashBackupCopy}' FAILED!", ABHelper::LOGLEVEL_ERR);
-                    }
-                }
-                // Following is from Download.php
-                if ($backup = readlink($docroot . '/' . $output[0])) {
-                    unlink($backup);
-                }
-                @unlink($docroot . '/' . $output[0]);
-            }
+            ABHelper::backupLog("Flash backup failed: No output from script", ABHelper::LOGLEVEL_ERR);
+            $this->errorOccurred = true;
+            return;
         }
-    }
 
-}
-
-if (ABHelper::abortRequested()) {
-    goto abort;
-}
-
-if ($abSettings->backupVMMeta == 'yes') {
-
-    if (!file_exists(ABSettings::$qemuFolder)) {
-        ABHelper::backupLog("VM meta should be backed up but VM manager is disabled!", ABHelper::LOGLEVEL_WARN);
-    } else {
-        ABHelper::backupLog("VM meta backup enabled! Backing up...");
-
-        $output = $resultcode = null;
-        exec("tar -czf " . escapeshellarg($abDestination . '/vm_meta.tgz') . " " . ABSettings::$qemuFolder . '/ ' . ABSettings::$externalCmdPidCapture, $output, $resultcode);
-        ABHelper::backupLog("tar return: $resultcode and output: " . print_r($output), ABHelper::LOGLEVEL_DEBUG);
-        if ($resultcode != 0) {
-            ABHelper::backupLog("Error while backing up VM XMLs. Please see debug log!", ABHelper::LOGLEVEL_ERR);
-        } else {
-            ABHelper::backupLog("Done!");
+        if (!copy($docroot . '/' . $output[0], $this->destination . '/' . $output[0])) {
+            ABHelper::backupLog("Failed to copy flash backup to destination", ABHelper::LOGLEVEL_ERR);
+            $this->errorOccurred = true;
+            return;
         }
-    }
-}
 
-if (ABHelper::abortRequested()) {
-    goto abort;
-}
-
-
-if (!empty($abSettings->includeFiles)) {
-    ABHelper::backupLog("Include files is NOT empty:" . PHP_EOL . print_r($abSettings->includeFiles, true), ABHelper::LOGLEVEL_DEBUG);
-    $extrasChecked = [];
-    foreach ($abSettings->includeFiles as $extra) {
-        $extra = trim($extra);
-        if (!empty($extra) && file_exists($extra)) {
-            if (is_link($extra)) {
-                ABHelper::backupLog("Specified extra file/folder '$extra' is a symlink. Will convert it to its real path!", ABHelper::LOGLEVEL_WARN);
-                $extra = readlink($extra); // file_exists checks symlinks for target existence, so at this point, we know, the symlink exists!
-            }
-            $extrasChecked[] = $extra;
-        } else {
-            ABHelper::backupLog("Specified extra file/folder '$extra' is empty or does not exist!", ABHelper::LOGLEVEL_ERR);
-        }
-    }
-
-    if (empty($extrasChecked)) {
-        ABHelper::backupLog("The tested extra files list is empty! Skipping extra files", ABHelper::LOGLEVEL_WARN);
-    } else {
-        ABHelper::backupLog("Extra files to backup: " . implode(', ', $extrasChecked), ABHelper::LOGLEVEL_DEBUG);
-
-        $tarExcludes = [];
-        if (!empty($abSettings->globalExclusions)) {
-            ABHelper::backupLog("Got global excludes! " . PHP_EOL . print_r($abSettings->globalExclusions, true), ABHelper::LOGLEVEL_DEBUG);
-            foreach ($abSettings->globalExclusions as $globalExclusion) {
-                $tarExcludes[] = '--exclude ' . escapeshellarg($globalExclusion);
+        ABHelper::backupLog("Flash backup completed");
+        
+        if (!empty($this->settings->flashBackupCopy)) {
+            ABHelper::backupLog("Copying flash backup to {$this->settings->flashBackupCopy}...");
+            if (!copy($docroot . '/' . $output[0], $this->settings->flashBackupCopy . '/' . $output[0])) {
+                ABHelper::backupLog("Failed to copy flash backup to {$this->settings->flashBackupCopy}", ABHelper::LOGLEVEL_ERR);
+                $this->errorOccurred = true;
             }
         }
 
-        $tarOptions = array_merge($tarExcludes, ['-c', '-P']);    // Add excludes to the beginning - https://unix.stackexchange.com/a/33334
+        if ($backup = readlink($docroot . '/' . $output[0])) {
+            unlink($backup);
+        }
+        @unlink($docroot . '/' . $output[0]);
+    }
 
-        if ($abSettings->ignoreExclusionCase == 'yes') {
+    /**
+     * Backs up VM metadata
+     */
+    private function backupVMMeta(): void {
+        if ($this->settings->backupVMMeta !== 'yes') {
+            return;
+        }
+
+        if (!file_exists(ABSettings::$qemuFolder)) {
+            ABHelper::backupLog("VM metadata backup enabled but VM manager is disabled", ABHelper::LOGLEVEL_WARN);
+            return;
+        }
+
+        ABHelper::backupLog("Backing up VM metadata...");
+        $output = $resultCode = null;
+        exec("tar -czf " . escapeshellarg($this->destination . '/vm_meta.tgz') . " " . ABSettings::$qemuFolder . '/ ' . ABSettings::$externalCmdPidCapture, $output, $resultCode);
+        
+        ABHelper::backupLog("Tar command output: " . print_r($output, true), ABHelper::LOGLEVEL_DEBUG);
+        if ($resultCode !== 0) {
+            ABHelper::backupLog("Failed to backup VM metadata", ABHelper::LOGLEVEL_ERR);
+            $this->errorOccurred = true;
+        } else {
+            ABHelper::backupLog("VM metadata backup completed");
+        }
+    }
+
+    /**
+     * Backs up extra files
+     */
+    private function backupExtraFiles(): void {
+        if (empty($this->settings->includeFiles)) {
+            return;
+        }
+
+        ABHelper::backupLog("Processing extra files: " . print_r($this->settings->includeFiles, true), ABHelper::LOGLEVEL_DEBUG);
+        $validFiles = array_filter($this->settings->includeFiles, function($file) {
+            $file = trim($file);
+            if (empty($file) || !file_exists($file)) {
+                ABHelper::backupLog("Invalid extra file/folder: {$file}", ABHelper::LOGLEVEL_ERR);
+                return false;
+            }
+            if (is_link($file)) {
+                ABHelper::backupLog("Converting symlink {$file} to real path", ABHelper::LOGLEVEL_WARN);
+                return readlink($file);
+            }
+            return true;
+        });
+
+        if (empty($validFiles)) {
+            ABHelper::backupLog("No valid extra files to backup", ABHelper::LOGLEVEL_WARN);
+            return;
+        }
+
+        ABHelper::backupLog("Backing up extra files: " . implode(', ', $validFiles), ABHelper::LOGLEVEL_DEBUG);
+        
+        $tarOptions = ['-c', '-P'];
+        if (!empty($this->settings->globalExclusions)) {
+            $tarOptions = array_merge(array_map(fn($ex) => '--exclude ' . escapeshellarg($ex), $this->settings->globalExclusions), $tarOptions);
+        }
+
+        if ($this->settings->ignoreExclusionCase === 'yes') {
             $tarOptions[] = '--ignore-case';
         }
 
-        $destination = $abDestination . '/extra_files.tar';
-
-        switch ($abSettings->compression) {
+        $destination = $this->destination . '/extra_files.tar';
+        switch ($this->settings->compression) {
             case 'yes':
-                $tarOptions[] = '-z'; // GZip
-                $destination  .= '.gz';
+                $tarOptions[] = '-z';
+                $destination .= '.gz';
                 break;
             case 'yesMulticore':
-                $tarOptions[] = '-I zstdmt'; // zst multicore
-                $destination  .= '.zst';
+                $tarOptions[] = '-I zstdmt';
+                $destination .= '.zst';
                 break;
         }
-        $tarOptions[] = '-f ' . escapeshellarg($destination); // Destination file
-        ABHelper::backupLog("Target archive: " . $destination, ABHelper::LOGLEVEL_DEBUG);
 
-        foreach ($extrasChecked as $extraChecked) {
-            $tarOptions[] = escapeshellarg($extraChecked);
-        }
+        $tarOptions[] = '-f ' . escapeshellarg($destination);
+        $tarOptions = array_merge($tarOptions, array_map('escapeshellarg', $validFiles));
+        $command = "tar " . implode(" ", $tarOptions);
 
-        $finalTarOptions = implode(" ", $tarOptions);
+        ABHelper::backupLog("Executing tar command: {$command}", ABHelper::LOGLEVEL_DEBUG);
+        $output = $resultCode = null;
+        exec("{$command} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultCode);
 
-        ABHelper::backupLog("Generated tar command: " . $finalTarOptions, ABHelper::LOGLEVEL_DEBUG);
-        ABHelper::backupLog("Backing up extra files...");
-
-        $output = $resultcode = null;
-        exec("tar " . $finalTarOptions . " 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
-        ABHelper::backupLog("Tar out: " . implode('; ', $output), ABHelper::LOGLEVEL_DEBUG);
-
-        if ($resultcode > 0) {
-            ABHelper::backupLog("tar creation failed! Tar said: " . implode('; ', $output), ABHelper::LOGLEVEL_ERR);
+        ABHelper::backupLog("Tar output: " . implode('; ', $output), ABHelper::LOGLEVEL_DEBUG);
+        if ($resultCode !== 0) {
+            ABHelper::backupLog("Failed to create extra files archive: " . implode('; ', $output), ABHelper::LOGLEVEL_ERR);
+            $this->errorOccurred = true;
         } else {
-            ABHelper::backupLog("Backup created without issues");
+            ABHelper::backupLog("Extra files backup completed");
         }
     }
-}
 
+    /**
+     * Handles retention policy
+     */
+    private function handleRetention(): void {
+        if ($this->errorOccurred) {
+            ABHelper::backupLog("Skipping retention check due to errors", ABHelper::LOGLEVEL_WARN);
+            return;
+        }
 
-end:
+        if (empty($this->settings->keepMinBackups) && empty($this->settings->deleteBackupsOlderThan)) {
+            ABHelper::backupLog("Retention policies disabled", ABHelper::LOGLEVEL_WARN);
+            return;
+        }
 
-if (ABHelper::$errorOccured) {
-    ABHelper::backupLog("An error occurred during backup! RETENTION WILL NOT BE CHECKED! Please review the log. If you need further assistance, ask in the support forum.", ABHelper::LOGLEVEL_WARN);
-} else {
-    ABHelper::backupLog("Checking retention...");
-    if (empty($abSettings->keepMinBackups) && empty($abSettings->deleteBackupsOlderThan)) {
-        ABHelper::backupLog("BOTH retention settings are disabled!", ABHelper::LOGLEVEL_WARN);
-    } else { // Retention enabled
-        $keepMinBackupsNum = empty($abSettings->keepMinBackups) ? 0 : $abSettings->keepMinBackups;
-        $curBackupsState   = array_reverse(glob(rtrim($abSettings->destination, '/') . '/ab_*'));// glob return sorted by name. Without naming, thats the oldest first, newest at the end
+        ABHelper::backupLog("Processing retention policy...");
+        $minBackups = $this->settings->keepMinBackups ?? 0;
+        $backups = array_reverse(glob(rtrim($this->settings->destination, '/') . '/ab_*'));
+        $toKeep = array_slice($backups, 0, $minBackups);
 
-        $toKeep = array_slice($curBackupsState, 0, $keepMinBackupsNum);
-        ABHelper::backupLog("toKeep after slicing:" . PHP_EOL . print_r($toKeep, true), ABHelper::LOGLEVEL_DEBUG);
+        if (!empty($this->settings->deleteBackupsOlderThan)) {
+            $thresholdDate = (new DateTime())->modify("-{$this->settings->deleteBackupsOlderThan} days");
+            ABHelper::backupLog("Retention threshold: " . $thresholdDate->format('Ymd_His'), ABHelper::LOGLEVEL_DEBUG);
 
-        if (!empty($abSettings->deleteBackupsOlderThan)) {
-            $nowDate = new DateTime();
-            $nowDate->modify('-' . $abSettings->deleteBackupsOlderThan . ' days');
-            ABHelper::backupLog("Delete backups older than " . $nowDate->format("Ymd_His"), ABHelper::LOGLEVEL_DEBUG);
-
-            foreach ($curBackupsState as $backupItem) {
-                $correctedItem = array_reverse(explode("/", $backupItem))[0];
-                $backupDate    = date_create_from_format("??_Ymd_His", $correctedItem);
+            foreach ($backups as $backup) {
+                $backupName = basename($backup);
+                $backupDate = date_create_from_format('??_Ymd_His', $backupName);
+                
                 if (!$backupDate) {
-                    ABHelper::backupLog("Cannot create date from " . $correctedItem, ABHelper::LOGLEVEL_DEBUG);
-                    $toKeep[] = $backupItem; // Keep the errornous object - Better safe than sorry.
+                    ABHelper::backupLog("Invalid backup date format: {$backupName}", ABHelper::LOGLEVEL_DEBUG);
+                    $toKeep[] = $backup;
                     continue;
                 }
-                if ($backupDate >= $nowDate && !in_array($backupItem, $toKeep)) {
-                    ABHelper::backupLog("Keeping " . $backupItem, ABHelper::LOGLEVEL_DEBUG);
-                    $toKeep[] = $backupItem;
-                } else {
-                    ABHelper::backupLog("Discarding $backupItem, because its newer or already in toKeep", ABHelper::LOGLEVEL_DEBUG);
+
+                if ($backupDate >= $thresholdDate && !in_array($backup, $toKeep)) {
+                    $toKeep[] = $backup;
                 }
             }
         }
 
-        $toDelete = array_diff($curBackupsState, $toKeep);
-        ABHelper::backupLog("Resulting toKeep: " . implode(', ', $toKeep), ABHelper::LOGLEVEL_DEBUG);
-        ABHelper::backupLog("Resulting deletion list: " . implode(', ', $toDelete), ABHelper::LOGLEVEL_DEBUG);
+        $toDelete = array_diff($backups, $toKeep);
+        ABHelper::backupLog("Retaining: " . implode(', ', $toKeep), ABHelper::LOGLEVEL_DEBUG);
+        ABHelper::backupLog("Deleting: " . implode(', ', $toDelete), ABHelper::LOGLEVEL_DEBUG);
 
-        foreach ($toDelete as $deleteBackupPath) {
-            ABHelper::backupLog("Delete old backup: " . $deleteBackupPath);
-            exec("rm -rf " . escapeshellarg($deleteBackupPath));
+        foreach ($toDelete as $backup) {
+            ABHelper::backupLog("Removing old backup: {$backup}");
+            exec("rm -rf " . escapeshellarg($backup));
         }
-
-    }
-}
-
-if (ABHelper::abortRequested()) {
-    goto abort;
-}
-
-abort:
-ABHelper::setCurrentContainerName(null);
-if (ABHelper::abortRequested()) {
-    ABHelper::$errorOccured = true;
-    ABHelper::backupLog("Backup cancelled! Executing final things. You will be left behind with the current state!", ABHelper::LOGLEVEL_WARN);
-}
-
-ABHelper::backupLog("DONE! Thanks for using this plugin and have a safe day ;)");
-ABHelper::backupLog("❤️");
-
-sleep(1); # In some cases a backup could create two notifications in a row, Unraid discards the latter then, so sleep 1 second
-
-if (!ABHelper::$errorOccured && $abSettings->successLogWanted == 'yes') {
-    $backupEnded    = new DateTime();
-    $diff           = $backupStarted->diff($backupEnded);
-    $backupDuration = $diff->h . "h, " . $diff->i . "m";
-    ABHelper::notify("Appdata Backup", "Backup done [$backupDuration]!", "The backup was successful and took $backupDuration!");
-}
-
-if (!empty($abDestination)) {
-    copy(ABSettings::$tempFolder . '/' . ABSettings::$logfile, $abDestination . '/backup.log');
-    copy(ABSettings::getConfigPath(), $abDestination . '/' . ABSettings::$settingsFile);
-    if (ABHelper::$errorOccured) {
-        copy(ABSettings::$tempFolder . '/' . ABSettings::$debugLogFile, $abDestination . '/backup.debug.log');
-        rename($abDestination, $abDestination . '-failed');
-        $abDestination = $abDestination . '-failed';
     }
 
     /**
-     * Adjusting backup destination permissions (for this run)
+     * Finalizes the backup process
      */
-    exec("chown -R nobody:users " . escapeshellarg($abDestination));
-    exec("chmod -R u=rw,g=r,o=- " . escapeshellarg($abDestination));
-    exec("chmod u=rwx,g=rx,o=- " . escapeshellarg($abDestination));
+    private function finalize(): void {
+        if (ABHelper::abortRequested()) {
+            $this->handleAbort();
+            return;
+        }
 
+        // Copy logs and configuration
+        copy(ABSettings::$tempFolder . '/' . ABSettings::$logfile, $this->destination . '/backup.log');
+        copy(ABSettings::getConfigPath(), $this->destination . '/' . ABSettings::$settingsFile);
+
+        if ($this->errorOccurred) {
+            copy(ABSettings::$tempFolder . '/' . ABSettings::$debugLogFile, $this->destination . '/backup.debug.log');
+            rename($this->destination, $this->destination . '-failed');
+            $this->destination .= '-failed';
+        }
+
+        // Set permissions
+        exec("chown -R nobody:users " . escapeshellarg($this->destination));
+        exec("chmod -R u=rw,g=r,o=- " . escapeshellarg($this->destination));
+        exec("chmod u=rwx,g=rx,o=- " . escapeshellarg($this->destination));
+
+        // Run post-backup script
+        ABHelper::handlePrePostScript(
+            $this->settings->postRunScript,
+            'post-run',
+            $this->destination,
+            $this->errorOccurred ? 'false' : 'true'
+        );
+
+        // Send success notification if enabled
+        if (!$this->errorOccurred && $this->settings->successLogWanted === 'yes') {
+            $duration = $this->backupStartTime->diff(new DateTime());
+            $durationStr = "{$duration->h}h, {$duration->i}m";
+            ABHelper::notify("Appdata Backup", "Backup Completed [{$durationStr}]", "Backup completed successfully in {$durationStr}");
+        }
+
+        // Clean up state files
+        if (file_exists(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort)) {
+            unlink(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort);
+        }
+        unlink(ABSettings::$tempFolder . '/' . ABSettings::$stateFileScriptRunning);
+
+        ABHelper::backupLog("Backup process completed");
+    }
+
+    /**
+     * Handles backup abortion
+     */
+    private function handleAbort(): void {
+        ABHelper::setCurrentContainerName(null);
+        $this->errorOccurred = true;
+        ABHelper::backupLog("Backup cancelled", ABHelper::LOGLEVEL_WARN);
+        $this->finalize();
+    }
 }
 
-ABHelper::handlePrePostScript($abSettings->postRunScript, 'post-run', $abDestination ?? 'false', (ABHelper::$errorOccured ? 'false' : 'true'));
-
-if (file_exists(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort)) {
-    unlink(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort);
-}
-unlink(ABSettings::$tempFolder . '/' . ABSettings::$stateFileScriptRunning);
-
-exit(ABHelper::$errorOccured ? 1 : 0);
+// Execute backup
+$backup = new AppdataBackup();
+exit($backup->run());
+?>

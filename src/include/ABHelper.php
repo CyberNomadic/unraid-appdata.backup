@@ -5,7 +5,7 @@ namespace unraid\plugins\AppdataBackup;
 require_once __DIR__ . '/ABSettings.php';
 
 /**
- * This is a helper class for some useful things
+ * Helper class for Appdata Backup plugin utilities
  */
 class ABHelper {
 
@@ -15,7 +15,7 @@ class ABHelper {
     const LOGLEVEL_ERR = 'error';
 
     /**
-     * @var array Store some temporary data about containers, which should skipped during start routine
+     * @var array Store containers to skip during start routine
      */
     private static $skipStartContainers = [];
 
@@ -26,12 +26,11 @@ class ABHelper {
     ];
     public static $errorOccured = false;
     private static array $currentContainerName = [];
-
     public static $targetLogLevel = '';
 
     /**
      * Logs a message to the system log
-     * @param $string
+     * @param string $string
      * @return void
      */
     public static function logger($string) {
@@ -39,20 +38,18 @@ class ABHelper {
     }
 
     /**
-     * Checks, if the Array is online
+     * Checks if the array is online
      * @return bool
      */
     public static function isArrayOnline() {
         $emhttpVars = parse_ini_file(ABSettings::$emhttpVars);
-        if ($emhttpVars && $emhttpVars['fsState'] == 'Started') {
-            return true;
-        }
-        return false;
+        return $emhttpVars && $emhttpVars['fsState'] === 'Started';
     }
 
     /**
-     * Takes care of every hook script execution
-     * @param $script string
+     * Executes hook scripts
+     * @param string $script
+     * @param mixed ...$args
      * @return int|bool
      */
     public static function handlePrePostScript($script, ...$args) {
@@ -61,65 +58,45 @@ class ABHelper {
             return true;
         }
 
-        if (file_exists($script)) {
-            if (!is_executable($script)) {
-                self::backupLog($script . ' is not executable! Skipping!', self::LOGLEVEL_ERR);
-                return false;
-            }
-
-            $arguments = '';
-            foreach ($args as $arg) {
-                $arguments .= ' ' . escapeshellarg($arg);
-            }
-
-            $cmd = escapeshellarg($script) . " " . $arguments;
-
-            $output = $resultcode = null;
-            self::backupLog("Executing script $cmd...");
-            exec($cmd, $output, $resultcode);
-            self::backupLog($script . " CODE: " . $resultcode . " - " . print_r($output, true), self::LOGLEVEL_DEBUG);
-            self::backupLog("Script executed!");
-
-            if ($resultcode != 0 && $resultcode != 2) {
-                self::backupLog("Script did not returned 0 (ok) or 2 (skip). It returned $resultcode!", self::LOGLEVEL_WARN);
-            }
-            return $resultcode;
-        } else {
-            self::backupLog($script . ' is not existing! Skipping!', self::LOGLEVEL_ERR);
+        if (!file_exists($script)) {
+            self::backupLog("{$script} does not exist! Skipping!", self::LOGLEVEL_ERR);
             return false;
         }
+
+        if (!is_executable($script)) {
+            self::backupLog("{$script} is not executable! Skipping!", self::LOGLEVEL_ERR);
+            return false;
+        }
+
+        $arguments = implode(' ', array_map('escapeshellarg', $args));
+        $cmd = escapeshellarg($script) . " " . $arguments;
+
+        self::backupLog("Executing script {$cmd}...");
+        exec($cmd, $output, $resultcode);
+        self::backupLog("{$script} CODE: {$resultcode} - " . print_r($output, true), self::LOGLEVEL_DEBUG);
+        self::backupLog("Script executed!");
+
+        if ($resultcode != 0 && $resultcode != 2) {
+            self::backupLog("Script returned {$resultcode} (expected 0 or 2)!", self::LOGLEVEL_WARN);
+        }
+        return $resultcode;
     }
 
     /**
-     * Logs something to the backup logfile
-     * @param $level string
-     * @param $msg string
-     * @param $newLine bool
-     * @param $skipDate bool
+     * Logs to the backup logfile
+     * @param string $msg
+     * @param string $level
+     * @param bool $newLine
+     * @param bool $skipDate
      * @return void
      */
     public static function backupLog(string $msg, string $level = self::LOGLEVEL_INFO, bool $newLine = true, bool $skipDate = false) {
-
-        /**
-         * Do not log, if the script is not running or the requesting pid is not the script pid
-         */
         if (!self::scriptRunning() || self::scriptRunning() != getmypid()) {
             return;
         }
 
-        $sectionString = '';
-        foreach (self::$currentContainerName as $value) {
-            if (empty($value)) {
-                continue;
-            }
-            $sectionString .= "[$value]";
-        }
-
-        if (empty($sectionString)) {
-            $sectionString = '[Main]';
-        }
-
-        $logLine = ($skipDate ? '' : "[" . date("d.m.Y H:i:s") . "][" . (self::$emojiLevels[$level] ?? $level) . "]$sectionString") . " $msg" . ($newLine ? "\n" : '');
+        $sectionString = empty(self::$currentContainerName) ? '[Main]' : '[' . implode('][', array_filter(self::$currentContainerName)) . ']';
+        $logLine = ($skipDate ? '' : "[" . date("d.m.Y H:i:s") . "][" . (self::$emojiLevels[$level] ?? $level) . "]" . $sectionString) . " {$msg}" . ($newLine ? "\n" : '');
 
         if ($level != self::LOGLEVEL_DEBUG) {
             file_put_contents(ABSettings::$tempFolder . '/' . ABSettings::$logfile, $logLine, FILE_APPEND);
@@ -127,24 +104,22 @@ class ABHelper {
         file_put_contents(ABSettings::$tempFolder . '/' . ABSettings::$debugLogFile, $logLine, FILE_APPEND);
 
         if (!in_array(self::$targetLogLevel, [self::LOGLEVEL_INFO, self::LOGLEVEL_WARN, self::LOGLEVEL_ERR])) {
-            return; // No notification wanted!
+            return;
         }
 
-        if ($level == self::LOGLEVEL_ERR) { // Log errors always
+        if ($level == self::LOGLEVEL_ERR) {
             self::notify("[AppdataBackup] Error!", "Please check the backup log!", $msg, 'alert');
-        }
-
-        if ($level == self::LOGLEVEL_WARN && self::$targetLogLevel == self::LOGLEVEL_WARN) {
+        } elseif ($level == self::LOGLEVEL_WARN && self::$targetLogLevel == self::LOGLEVEL_WARN) {
             self::notify("[AppdataBackup] Warning!", "Please check the backup log!", $msg, 'warning');
         }
     }
 
     /**
-     * Send a message to the system notification system
-     * @param $subject
-     * @param $description
-     * @param $message
-     * @param $type
+     * Sends a system notification
+     * @param string $subject
+     * @param string $description
+     * @param string $message
+     * @param string $type
      * @return void
      */
     public static function notify($subject, $description, $message = "", $type = "normal") {
@@ -154,67 +129,60 @@ class ABHelper {
 
     /**
      * Stops a container
-     * @param $container array
-     * @return true|void
+     * @param array $container
+     * @param ABSettings $abSettings
+     * @param DockerClient $dockerClient
+     * @return bool
      */
-    public static function stopContainer($container) {
-        global $dockerClient, $abSettings;
-
+    public static function stopContainer($container, $abSettings, $dockerClient) {
         $containerSettings = $abSettings->getContainerSpecificSettings($container['Name']);
 
-
         if ($container['Running'] && !$container['Paused']) {
-            self::backupLog("Stopping " . $container['Name'] . "... ", self::LOGLEVEL_INFO, false);
+            self::backupLog("Stopping {$container['Name']}... ", self::LOGLEVEL_INFO, false);
 
             if ($containerSettings['dontStop'] == 'yes') {
-                self::backupLog("NOT stopping " . $container['Name'] . " because it should be backed up WITHOUT stopping!");
+                self::backupLog("NOT stopping {$container['Name']} because it should be backed up WITHOUT stopping!");
                 self::$skipStartContainers[] = $container['Name'];
                 return true;
             }
 
-            $stopTimer      = time();
+            $stopTimer = time();
             $dockerStopCode = $dockerClient->stopContainer($container['Name']);
             if ($dockerStopCode != 1) {
-                self::backupLog("Error while stopping container! Code: " . $dockerStopCode . " - trying 'docker stop' method", self::LOGLEVEL_WARN, true, true);
-                $out = $code = null;
+                self::backupLog("Error while stopping container! Code: {$dockerStopCode} - trying 'docker stop' method", self::LOGLEVEL_WARN, true, true);
                 exec("docker stop " . escapeshellarg($container['Name']) . " -t 30", $out, $code);
                 if ($code == 0) {
                     self::backupLog("That _seemed_ to work.");
                 } else {
-                    self::backupLog("docker stop variant was unsuccessful as well! Docker said: " . implode(', ', $out), self::LOGLEVEL_ERR);
+                    self::backupLog("docker stop variant was unsuccessful! Docker said: " . implode(', ', $out), self::LOGLEVEL_ERR);
                 }
             } else {
                 self::backupLog("done! (took " . (time() - $stopTimer) . " seconds)", self::LOGLEVEL_INFO, true, true);
             }
-
         } else {
             self::$skipStartContainers[] = $container['Name'];
-            $state                       = "Not started!";
-            if ($container['Paused']) {
-                $state = "Paused!";
-            }
-            self::backupLog("No stopping needed for {$container['Name']}: $state");
+            $state = $container['Paused'] ? "Paused!" : "Not started!";
+            self::backupLog("No stopping needed for {$container['Name']}: {$state}");
         }
+        return true;
     }
 
     /**
      * Starts a container
-     * @param $container array
+     * @param array $container
+     * @param DockerClient $dockerClient
      * @return void
      */
-    public static function startContainer($container) {
-        global $dockerClient;
-
+    public static function startContainer($container, $dockerClient) {
         if (in_array($container['Name'], self::$skipStartContainers)) {
-            self::backupLog("Starting " . $container['Name'] . " is being ignored, because it was not started before (or should not be started).");
+            self::backupLog("Starting {$container['Name']} is ignored, as it was not started before or should not be started.");
             return;
         }
 
         $dockerContainerStarted = false;
-        $dockerStartTry         = 1;
-        $delay                  = 0;
+        $dockerStartTry = 1;
+        $delay = 0;
 
-        // @todo: Some kind of caching?
         if (file_exists(ABSettings::$unraidAutostartFile) && $autostart = file(ABSettings::$unraidAutostartFile)) {
             foreach ($autostart as $autostartLine) {
                 $line = explode(" ", trim($autostartLine));
@@ -228,68 +196,67 @@ class ABHelper {
         }
 
         do {
-            self::backupLog("Starting {$container['Name']}... (try #$dockerStartTry) ", self::LOGLEVEL_INFO, false);
+            self::backupLog("Starting {$container['Name']}... (try #{$dockerStartTry}) ", self::LOGLEVEL_INFO, false);
             $dockerStartCode = $dockerClient->startContainer($container['Name']);
             if ($dockerStartCode != 1) {
                 if ($dockerStartCode == "Container already started") {
-                    self::backupLog("Hmm - container is already started!", self::LOGLEVEL_WARN, true, true);
+                    self::backupLog("Container is already started!", self::LOGLEVEL_WARN, true, true);
                     $nowRunning = $dockerClient->getDockerContainers();
                     foreach ($nowRunning as $nowRunningContainer) {
                         if ($nowRunningContainer["Name"] == $container['Name']) {
-                            self::backupLog("AFTER backing up container status: " . print_r($nowRunningContainer, true), self::LOGLEVEL_DEBUG);
+                            self::backupLog("After backup container status: " . print_r($nowRunningContainer, true), self::LOGLEVEL_DEBUG);
                         }
                     }
                     $dockerContainerStarted = true;
                     continue;
                 }
 
-                self::backupLog("Container did not started! - Code: " . $dockerStartCode, self::LOGLEVEL_WARN, true, true);
+                self::backupLog("Container did not start! Code: {$dockerStartCode}", self::LOGLEVEL_WARN, true, true);
                 if ($dockerStartTry < 3) {
                     $dockerStartTry++;
                     sleep(5);
                 } else {
-                    self::backupLog("Container did not started after multiple tries, skipping. More infos in debug log", self::LOGLEVEL_ERR);
-                    $output = null;
+                    self::backupLog("Container did not start after multiple tries, skipping.", self::LOGLEVEL_ERR);
                     exec("docker ps -a", $output);
-                    self::backupLog("docker ps -a:" . PHP_EOL . print_r($output, true), self::LOGLEVEL_DEBUG);
-                    break; // Exit do-while
+                    self::backupLog("docker ps -a: " . print_r($output, true), self::LOGLEVEL_DEBUG);
+                    break;
                 }
             } else {
                 self::backupLog("done!", self::LOGLEVEL_INFO, true, true);
                 $dockerContainerStarted = true;
             }
         } while (!$dockerContainerStarted);
+
         if ($delay) {
-            self::backupLog("The container has a delay set, waiting $delay seconds before carrying on");
+            self::backupLog("Waiting {$delay} seconds due to container delay setting");
             sleep($delay);
         } else {
-            // Sleep 2 seconds in general
             sleep(2);
         }
     }
 
     /**
-     * Sort docker containers, provided by dynamix DockerClient and provided order array
-     * @param $containers array DockerClient container array
-     * @param $order array order array
-     * @param $reverse bool return reverse order (unknown containers are always placed to the end of the returning array
-     * @return array with name as key and DockerClient info-array as value
+     * Sorts Docker containers based on provided order
+     * @param array $containers DockerClient container array
+     * @param array $order Order array
+     * @param bool $reverse Return reverse order
+     * @param bool $removeSkipped Remove skipped containers
+     * @param array $group Group filter
+     * @param ABSettings|null $abSettings Settings object
+     * @return array Sorted containers
      */
-    public static function sortContainers($containers, $order, $reverse = false, $removeSkipped = true, array $group = []) {
-        global $abSettings;
+    public static function sortContainers($containers, $order, $reverse = false, $removeSkipped = true, array $group = [], ?ABSettings $abSettings = null) {
+        $abSettings = $abSettings ?? new ABSettings(); // Default to new instance if not provided
 
-        // Add isGroup default to false
         foreach ($containers as $key => $container) {
             $containers[$key]['isGroup'] = false;
         }
 
         $_containers = array_column($containers, null, 'Name');
         if ($group) {
-            $_containers = array_filter($_containers, function ($key) use ($group) {
-                return in_array($key, $group);
-            }, ARRAY_FILTER_USE_KEY);
+            $_containers = array_filter($_containers, fn($key) => in_array($key, $group), ARRAY_FILTER_USE_KEY);
         } else {
-            $groups          = $abSettings->getContainerGroups();
+            $groups = $abSettings->getContainerGroups();
             $appendinggroups = [];
             foreach ($groups as $groupName => $members) {
                 foreach ($members as $member) {
@@ -310,7 +277,7 @@ class ABHelper {
             if (!str_starts_with($name, '__grp__')) {
                 $containerSettings = $abSettings->getContainerSpecificSettings($name, $removeSkipped);
                 if ($containerSettings['skip'] == 'yes' && $removeSkipped) {
-                    self::backupLog("Not adding $name to sorted containers: should be ignored", self::LOGLEVEL_DEBUG);
+                    self::backupLog("Not adding {$name} to sorted containers: should be ignored", self::LOGLEVEL_DEBUG);
                     unset($_containers[$name]);
                     continue;
                 }
@@ -326,47 +293,41 @@ class ABHelper {
         return array_merge($sortedContainers, $_containers);
     }
 
-
     /**
-     * The heart func: take care of creating a backup!
-     * @param $container array
-     * @param $destination string The generated backup folder for this backup run
+     * Backs up a container's volumes
+     * @param array $container
+     * @param string $destination
+     * @param ABSettings $abSettings
+     * @param DockerClient $dockerClient
      * @return bool
      */
-    public static function backupContainer($container, $destination) {
-        global $abSettings, $dockerClient;
+    public static function backupContainer($container, $destination, $abSettings, $dockerClient) {
+        self::backupLog("Backup {$container['Name']} - Volume info: " . print_r($container['Volumes'], true), self::LOGLEVEL_DEBUG);
 
-        self::backupLog("Backup {$container['Name']} - Container Volumeinfo: " . print_r($container['Volumes'], true), self::LOGLEVEL_DEBUG);
-
-        $volumes = self::getContainerVolumes($container);
-
+        $volumes = self::getContainerVolumes($container, false, $abSettings);
         $containerSettings = $abSettings->getContainerSpecificSettings($container['Name']);
 
         if ($containerSettings['skipBackup'] == 'yes') {
-            self::backupLog("Should NOT backup this container at all. Only include it in stop/start. Skipping backup...");
+            self::backupLog("Skipping backup for {$container['Name']} as configured.");
             return true;
         }
 
         if ($containerSettings['backupExtVolumes'] == 'no') {
-            self::backupLog("Should NOT backup external volumes, sanitizing them...");
-            foreach ($volumes as $index => $volume) {
-                if (!self::isVolumeWithinAppdata($volume)) {
-                    unset($volumes[$index]);
-                }
-            }
+            self::backupLog("Excluding external volumes for {$container['Name']}...");
+            $volumes = array_filter($volumes, fn($volume) => self::isVolumeWithinAppdata($volume, $abSettings));
         } else {
-            self::backupLog("Backing up EXTERNAL volumes, because its enabled!");
+            self::backupLog("Including external volumes for {$container['Name']}.");
         }
 
         $tarExcludes = ['--exclude ' . escapeshellarg('/usr/local/share/docker/tailscale_container_hook')];
         if (!empty($containerSettings['exclude'])) {
-            self::backupLog("Container got excludes! " . implode(", ", $containerSettings['exclude']), self::LOGLEVEL_DEBUG);
+            self::backupLog("Container excludes: " . implode(", ", $containerSettings['exclude']), self::LOGLEVEL_DEBUG);
             foreach ($containerSettings['exclude'] as $exclude) {
                 $exclude = rtrim($exclude, "/");
                 if (!empty($exclude)) {
-                    if (($volumeKey = array_search($exclude, $volumes)) !== false) {
-                        self::backupLog("Exclusion \"$exclude\" matches a container volume - ignoring volume/exclusion pair");
-                        unset($volumes[$volumeKey]);
+                    if (in_array($exclude, $volumes)) {
+                        self::backupLog("Exclusion '{$exclude}' matches a volume - ignoring.", self::LOGLEVEL_DEBUG);
+                        $volumes = array_diff($volumes, [$exclude]);
                         continue;
                     }
                     $tarExcludes[] = '--exclude ' . escapeshellarg($exclude);
@@ -375,75 +336,63 @@ class ABHelper {
         }
 
         if (!empty($abSettings->globalExclusions)) {
-            self::backupLog("Got global excludes! " . PHP_EOL . print_r($abSettings->globalExclusions, true), self::LOGLEVEL_DEBUG);
+            self::backupLog("Global excludes: " . print_r($abSettings->globalExclusions, true), self::LOGLEVEL_DEBUG);
             foreach ($abSettings->globalExclusions as $globalExclusion) {
                 $tarExcludes[] = '--exclude ' . escapeshellarg($globalExclusion);
             }
         }
 
         if (empty($volumes)) {
-            self::backupLog($container['Name'] . " does not have any volume to back up! Skipping. Please consider ignoring this container.", self::LOGLEVEL_WARN);
+            self::backupLog("No volumes to back up for {$container['Name']}. Consider ignoring this container.", self::LOGLEVEL_WARN);
             return true;
         }
 
-        self::backupLog("Calculated volumes to back up: " . implode(", ", $volumes));
+        self::backupLog("Volumes to back up: " . implode(", ", $volumes));
 
         $destination = $destination . "/" . $container['Name'] . '.tar';
-
-        $tarVerifyOptions = array_merge($tarExcludes, ['--diff']);      // Add excludes to the beginning - https://unix.stackexchange.com/a/33334
-        $tarOptions       = array_merge($tarExcludes, ['-c', '-P']);    // Add excludes to the beginning - https://unix.stackexchange.com/a/33334
+        $tarVerifyOptions = array_merge($tarExcludes, ['--diff']);
+        $tarOptions = array_merge($tarExcludes, ['-c', '-P']);
 
         if ($abSettings->ignoreExclusionCase == 'yes') {
-            $tarOptions[]       = '--ignore-case';
-            $tarVerifyOptions[] = '--ignore-case';
+            $tarOptions[] = $tarVerifyOptions[] = '--ignore-case';
         }
 
         switch ($abSettings->compression) {
             case 'yes':
-                $tarOptions[] = '-z'; // GZip
-                $destination  .= '.gz';
+                $tarOptions[] = '-z';
+                $destination .= '.gz';
                 break;
             case 'yesMulticore':
-                $cpuCount     = $abSettings->compressionCpuLimit;
-                $tarOptions[] = '-I "zstd -T' . $cpuCount . '"'; // zst multicore
-                $destination  .= '.zst';
+                $tarOptions[] = '-I "zstd -T' . $abSettings->compressionCpuLimit . '"';
+                $destination .= '.zst';
                 break;
         }
-        self::backupLog("Target archive: " . $destination, self::LOGLEVEL_DEBUG);
 
-        $tarOptions[] = $tarVerifyOptions[] = '-f ' . escapeshellarg($destination); // Destination file
+        self::backupLog("Target archive: {$destination}", self::LOGLEVEL_DEBUG);
+        $tarOptions[] = $tarVerifyOptions[] = '-f ' . escapeshellarg($destination);
+        $tarOptions = array_merge($tarOptions, array_map('escapeshellarg', $volumes));
+        $tarVerifyOptions = array_merge($tarVerifyOptions, array_map('escapeshellarg', $volumes));
 
-        foreach ($volumes as $volume) {
-            $tarOptions[] = $tarVerifyOptions[] = escapeshellarg($volume);
-        }
-        $finalTarOptions       = implode(" ", $tarOptions);
+        $finalTarOptions = implode(" ", $tarOptions);
         $finalTarVerifyOptions = implode(" ", $tarVerifyOptions);
 
-        self::backupLog("Generated tar command: " . $finalTarOptions, self::LOGLEVEL_DEBUG);
-        self::backupLog("Backing up " . $container['Name'] . '...');
+        self::backupLog("Generated tar command: {$finalTarOptions}", self::LOGLEVEL_DEBUG);
+        self::backupLog("Backing up {$container['Name']}...");
 
         $tarBackupTimer = time();
-
-        $output = $resultcode = null;
-        exec("tar " . $finalTarOptions . " 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
-        self::backupLog("Tar out: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
+        exec("tar {$finalTarOptions} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
+        self::backupLog("Tar output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
 
         if ($resultcode > 0) {
-            self::backupLog("tar creation failed! Tar said: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
-
-            /**
-             * Special debug: The creation was ok but verification failed: Something is accessing docker files! List docker info for this container
-             */
+            self::backupLog("tar creation failed: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
             foreach ($volumes as $volume) {
-                $output = null;
-                exec("lsof -nl +D " . escapeshellarg($volume), $output);
-                self::backupLog("lsof($volume)" . PHP_EOL . print_r($output, true), self::LOGLEVEL_DEBUG);
+                exec("lsof -nl +D " . escapeshellarg($volume), $lsofOutput);
+                self::backupLog("lsof({$volume}): " . print_r($lsofOutput, true), self::LOGLEVEL_DEBUG);
             }
-
             return $containerSettings['ignoreBackupErrors'] == 'yes';
         }
 
-        self::backupLog("Backup created without issues (took " . gmdate("H:i:s", time() - $tarBackupTimer) . " (hours:mins:secs))");
+        self::backupLog("Backup created (took " . gmdate("H:i:s", time() - $tarBackupTimer) . ")");
 
         if (self::abortRequested()) {
             return true;
@@ -452,126 +401,106 @@ class ABHelper {
         if ($containerSettings['verifyBackup'] == 'yes') {
             $tarVerifyTimer = time();
             self::backupLog("Verifying backup...");
-            self::backupLog("Final verify command: " . $finalTarVerifyOptions, self::LOGLEVEL_DEBUG);
+            self::backupLog("Verify command: {$finalTarVerifyOptions}", self::LOGLEVEL_DEBUG);
 
-            $output = $resultcode = null;
-            exec("tar " . $finalTarVerifyOptions . " 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
-            self::backupLog("Tar out: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
+            exec("tar {$finalTarVerifyOptions} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
+            self::backupLog("Tar output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
 
             if ($resultcode > 0) {
-                self::backupLog("tar verification failed! Tar said: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
-                /**
-                 * Special debug: The creation was ok but verification failed: Something is accessing docker files! List docker info for this container
-                 */
+                self::backupLog("tar verification failed: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
                 foreach ($volumes as $volume) {
-                    $output = null;
-                    exec("lsof -nl +D " . escapeshellarg($volume), $output);
-                    self::backupLog("lsof($volume)" . PHP_EOL . print_r($output, true), self::LOGLEVEL_DEBUG);
+                    exec("lsof -nl +D " . escapeshellarg($volume), $lsofOutput);
+                    self::backupLog("lsof({$volume}): " . print_r($lsofOutput, true), self::LOGLEVEL_DEBUG);
                 }
-
                 $nowRunning = $dockerClient->getDockerContainers();
                 foreach ($nowRunning as $nowRunningContainer) {
                     if ($nowRunningContainer["Name"] == $container['Name']) {
-                        self::backupLog("AFTER verify: " . print_r($nowRunningContainer, true), self::LOGLEVEL_DEBUG);
+                        self::backupLog("After verify: " . print_r($nowRunningContainer, true), self::LOGLEVEL_DEBUG);
                     }
                 }
                 return $containerSettings['ignoreBackupErrors'] == 'yes';
-            } else {
-                self::backupLog("Verification ended without issues (took " . gmdate("H:i:s", time() - $tarVerifyTimer) . " (hours:mins:secs))");
             }
+            self::backupLog("Verification completed (took " . gmdate("H:i:s", time() - $tarVerifyTimer) . ")");
         } else {
-            self::backupLog("Skipping verification for this container because its not wanted!", self::LOGLEVEL_WARN);
+            self::backupLog("Skipping verification for {$container['Name']} as configured.", self::LOGLEVEL_WARN);
         }
         return true;
     }
 
     /**
-     * Checks, if backup/restore is running
-     * @param $externalCmd bool Check external commands (tar or something else) which was started by backup/restore?
-     * @return array|false|string|string[]|null
+     * Checks if backup/restore is running
+     * @param bool $externalCmd
+     * @return string|bool
      */
     public static function scriptRunning($externalCmd = false) {
         $filePath = ABSettings::$tempFolder . '/' . ($externalCmd ? ABSettings::$stateExtCmd : ABSettings::$stateFileScriptRunning);
-        $pid      = file_exists($filePath) ? file_get_contents($filePath) : false;
-        if (!$pid) {
-            // lockfile not there: process not running anymore
+        if (!file_exists($filePath)) {
             return false;
         }
-        $pid = preg_replace("/\D/", '', $pid); // Filter any non digit characters.
+        $pid = preg_replace("/\D/", '', file_get_contents($filePath));
         if (file_exists('/proc/' . $pid)) {
             return $pid;
-        } else {
-            unlink($filePath); // Remove dead state file
-            return false;
         }
+        unlink($filePath);
+        return false;
     }
 
     /**
+     * Checks if abort is requested
      * @return bool
-     * @todo: register_shutdown_function? in beiden Scripts? Damit kill und goto :end?
      */
     public static function abortRequested() {
         return file_exists(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort);
     }
 
     /**
-     * Helper, to get all host paths of a container
-     * @param $container
+     * Gets container volumes
+     * @param array $container
+     * @param bool $skipExclusionCheck
+     * @param ABSettings|null $abSettings
      * @return array
      */
-    public static function getContainerVolumes($container, $skipExclusionCheck = false) {
-        global $abSettings;
-
+    public static function getContainerVolumes($container, $skipExclusionCheck = false, ?ABSettings $abSettings = null) {
+        $abSettings = $abSettings ?? new ABSettings(); // Default to new instance if not provided
         $volumes = [];
         foreach ($container['Volumes'] ?? [] as $volume) {
             $hostPath = rtrim(explode(":", $volume)[0], '/');
             if (empty($hostPath)) {
-                self::backupLog("This volume is empty (rootfs mapped??)! Ignoring.", self::LOGLEVEL_DEBUG);
+                self::backupLog("Empty volume (rootfs mapped?) ignored.", self::LOGLEVEL_DEBUG);
                 continue;
             }
 
             if (!$skipExclusionCheck) {
                 $containerSettings = $abSettings->getContainerSpecificSettings($container['Name']);
-
                 if (in_array($hostPath, $containerSettings['exclude'])) {
-                    self::backupLog("Ignoring '$hostPath' because its listed in containers exclusions list!", self::LOGLEVEL_DEBUG);
+                    self::backupLog("Ignoring '{$hostPath}' (container exclusion).", self::LOGLEVEL_DEBUG);
                     continue;
                 }
-
                 if (in_array($hostPath, $abSettings->globalExclusions)) {
-                    self::backupLog("Ignoring '$hostPath' because its listed in global exclusions list!", self::LOGLEVEL_DEBUG);
+                    self::backupLog("Ignoring '{$hostPath}' (global exclusion).", self::LOGLEVEL_DEBUG);
                     continue;
                 }
             }
 
-            // @todo: if no / inside path, we are dealing with a docker volume and not a bind-mount!
-
             if (!file_exists($hostPath)) {
-                self::backupLog("'$hostPath' does NOT exist! Please check your mappings! Skipping it for now.", self::LOGLEVEL_ERR);
+                self::backupLog("'{$hostPath}' does not exist! Check mappings.", self::LOGLEVEL_ERR);
                 continue;
             }
             if (in_array($hostPath, $abSettings->allowedSources)) {
-                self::backupLog("Removing container mapping \"$hostPath\" because it is a source path (exact match)!");
+                self::backupLog("Removing mapping '{$hostPath}' (matches source path).");
                 continue;
             }
             $volumes[] = $hostPath;
         }
 
-        $volumes = array_unique($volumes); // Remove duplicate Array values => https://forums.unraid.net/topic/137710-plugin-appdatabackup/?do=findComment&comment=1256267
+        $volumes = array_unique($volumes);
+        usort($volumes, fn($a, $b) => strlen($a) <=> strlen($b));
+        self::backupLog("Sorted volumes: " . print_r($volumes, true), self::LOGLEVEL_DEBUG);
 
-        usort($volumes, function ($a, $b) {
-            return strlen($a) <=> strlen($b);
-        });
-        self::backupLog("usorted volumes: " . print_r($volumes, true), self::LOGLEVEL_DEBUG);
-
-        /**
-         * Check volumes against nesting
-         * Maybe someone has a better idea how to solve it efficiently?
-         */
-        foreach ($volumes as $volume) {
+        foreach ($volumes as $key => $volume) {
             foreach ($volumes as $key2 => $volume2) {
-                if ($volume !== $volume2 && self::isVolumeWithinAppdata($volume) && str_starts_with($volume2, $volume . '/')) { // Trailing slash assures whole directory name => https://forums.unraid.net/topic/136995-pluginbeta-appdatabackup/?do=findComment&comment=1255260
-                    self::backupLog("'$volume2' is within mapped volume '$volume'! Ignoring!");
+                if ($volume !== $volume2 && self::isVolumeWithinAppdata($volume, $abSettings) && str_starts_with($volume2, $volume . '/')) {
+                    self::backupLog("'{$volume2}' is within '{$volume}'. Ignoring!");
                     unset($volumes[$key2]);
                 }
             }
@@ -580,60 +509,83 @@ class ABHelper {
     }
 
     /**
-     * Is a given volume internal or external mapping?
-     * @param $volume
+     * Checks if a volume is within appdata
+     * @param string $volume
+     * @param ABSettings|null $abSettings
      * @return bool
      */
-    public static function isVolumeWithinAppdata($volume) {
-        global $abSettings;
-
+    public static function isVolumeWithinAppdata($volume, ?ABSettings $abSettings = null) {
+        $abSettings = $abSettings ?? new ABSettings(); // Default to new instance if not provided
         foreach ($abSettings->allowedSources as $appdataPath) {
-            if (str_starts_with($volume, $appdataPath . '/')) { // Add trailing slash to get exact match! Assures whole dir name!
-                self::backupLog("Volume '$volume' IS within AppdataPath '$appdataPath'!", self::LOGLEVEL_DEBUG);
+            if (str_starts_with($volume, $appdataPath . '/')) {
+                self::backupLog("Volume '{$volume}' is within '{$appdataPath}'.", self::LOGLEVEL_DEBUG);
                 return true;
             }
         }
         return false;
     }
 
+    /**
+     * Custom error handler
+     * @param int $errno
+     * @param string $errstr
+     * @param string $errfile
+     * @param int $errline
+     * @param array $errcontext
+     * @return bool
+     */
     public static function errorHandler(int $errno, string $errstr, string $errfile, int $errline, array $errcontext = []): bool {
-        $errStr = "got PHP error: $errno / $errstr $errfile:$errline with context: " . json_encode($errcontext);
+        $errStr = "PHP error: {$errno} / {$errstr} {$errfile}:{$errline} with context: " . json_encode($errcontext);
         file_put_contents("/tmp/appdata.backup_phperr", $errStr . PHP_EOL, FILE_APPEND);
-        self::backupLog("PHP-ERROR occured! $errno / $errstr $errfile:$errline", self::LOGLEVEL_DEBUG);
-
+        self::backupLog("PHP-ERROR: {$errno} / {$errstr} {$errfile}:{$errline}", self::LOGLEVEL_DEBUG);
         return true;
     }
 
-    public static function updateContainer($name) {
-        global $abSettings;
-        self::backupLog("Installing planned update for $name...");
+    /**
+     * Updates a container
+     * @param string $name
+     * @param ABSettings $abSettings
+     * @return void
+     */
+    public static function updateContainer($name, $abSettings) {
+        self::backupLog("Installing update for {$name}...");
         exec('/usr/local/emhttp/plugins/dynamix.docker.manager/scripts/update_container ' . escapeshellarg($name));
 
         if ($abSettings->updateLogWanted == 'yes') {
-            self::notify("Appdata Backup", "Container '$name' updated!", "Container '$name' was successfully updated during this backup run!");
+            self::notify("Appdata Backup", "Container '{$name}' updated!", "Container '{$name}' was successfully updated!");
         }
     }
 
-    public static function doBackupMethod($method, $containerListOverride = null) {
-        global $abSettings, $dockerContainers, $sortedStopContainers, $sortedStartContainers, $abDestination, $dockerUpdateList;
+    /**
+     * Performs backup based on method
+     * @param string $method
+     * @param array|null $containerListOverride
+     * @param ABSettings $abSettings
+     * @param DockerClient $dockerClient
+     * @param string $destination
+     * @return bool
+     */
+    public static function doBackupMethod($method, $containerListOverride, $abSettings, $dockerClient, $destination) {
+        $containers = $containerListOverride ?: $dockerClient->getDockerContainers();
+        $sortedStopContainers = self::sortContainers($containers, $abSettings->containerOrder, true, true, [], $abSettings);
+        $sortedStartContainers = self::sortContainers($containers, $abSettings->containerOrder, false, true, [], $abSettings);
+        $updateList = []; // Managed in backup.php
 
-        self::backupLog(__METHOD__ . ': $containerListOverride: ' . implode(', ', array_column(($containerListOverride ?? []), 'Name')), self::LOGLEVEL_DEBUG);
+        self::backupLog(__METHOD__ . ': Override containers: ' . implode(', ', array_column(($containerListOverride ?: $sortedStopContainers), 'Name')), self::LOGLEVEL_DEBUG);
 
         switch ($method) {
             case 'stopAll':
-
-                self::backupLog("Method: Stop all container before continuing.");
+                self::backupLog("Method: Stop all containers before backup.");
                 foreach ($containerListOverride ? array_reverse($containerListOverride) : $sortedStopContainers as $_container) {
-                    foreach ((self::resolveContainer($_container, true) ?: [$_container]) as $container) {
+                    foreach (self::resolveContainer($_container, $abSettings, $dockerClient, true) ?: [$_container] as $container) {
                         self::setCurrentContainerName($container);
-                        $preContainerRet = ABHelper::handlePrePostScript($abSettings->preContainerBackupScript, 'pre-container', $container['Name']);
+                        $preContainerRet = self::handlePrePostScript($abSettings->preContainerBackupScript, 'pre-container', $container['Name']);
                         if ($preContainerRet === 2) {
-                            self::backupLog("preContainer script decided to skip backup.");
+                            self::backupLog("preContainer script skipped backup.");
                             self::setCurrentContainerName($container, true);
                             continue;
                         }
-                        self::stopContainer($container);
-
+                        self::stopContainer($container, $abSettings, $dockerClient);
                         if (self::abortRequested()) {
                             return false;
                         }
@@ -642,144 +594,136 @@ class ABHelper {
                 }
 
                 self::setCurrentContainerName(null);
-
                 if (self::abortRequested()) {
                     return false;
                 }
 
-                self::backupLog("Starting backup for containers");
+                self::backupLog("Starting container backups");
                 foreach ($containerListOverride ? array_reverse($containerListOverride) : $sortedStopContainers as $_container) {
-                    foreach (self::resolveContainer($_container, true) ?: [$_container] as $container) {
+                    foreach (self::resolveContainer($_container, $abSettings, $dockerClient, true) ?: [$_container] as $container) {
                         self::setCurrentContainerName($container);
-
-                        if (!self::backupContainer($container, $abDestination)) {
+                        if (!self::backupContainer($container, $destination, $abSettings, $dockerClient)) {
                             self::$errorOccured = true;
                         }
-
-                        ABHelper::handlePrePostScript($abSettings->postContainerBackupScript, 'post-container', $container['Name']);
-
+                        self::handlePrePostScript($abSettings->postContainerBackupScript, 'post-container', $container['Name']);
                         if (self::abortRequested()) {
                             return false;
                         }
-
-                        if (in_array($container['Name'], $dockerUpdateList)) {
-                            self::updateContainer($container['Name']);
+                        if (in_array($container['Name'], $updateList)) {
+                            self::updateContainer($container['Name'], $abSettings);
                         }
                     }
                     self::setCurrentContainerName($_container, true);
                 }
 
                 self::setCurrentContainerName(null);
-
                 if (self::abortRequested()) {
                     return false;
                 }
 
-                self::handlePrePostScript($abSettings->postBackupScript, 'post-backup', $abDestination);
-
+                self::handlePrePostScript($abSettings->postBackupScript, 'post-backup', $destination);
                 if (self::abortRequested()) {
                     return false;
                 }
 
-                self::backupLog("Set containers to previous state");
+                self::backupLog("Restoring containers to previous state");
                 foreach ($containerListOverride ?: $sortedStartContainers as $_container) {
-                    foreach (self::resolveContainer($_container) ?: [$_container] as $container) {
+                    foreach (self::resolveContainer($_container, $abSettings, $dockerClient, false) ?: [$_container] as $container) {
                         self::setCurrentContainerName($container);
-                        self::startContainer($container);
-
+                        self::startContainer($container, $dockerClient);
                         if (self::abortRequested()) {
                             return false;
                         }
                     }
                     self::setCurrentContainerName($_container, true);
                 }
-
                 self::setCurrentContainerName(null);
-
                 break;
+
             case 'oneAfterTheOther':
                 self::backupLog("Method: Stop/Backup/Start");
-
                 if (self::abortRequested()) {
                     return false;
                 }
 
                 foreach ($containerListOverride ?: $sortedStopContainers as $container) {
-
                     if ($container['isGroup']) {
-                        $groupContainers = self::resolveContainer($container);
+                        $groupContainers = self::resolveContainer($container, $abSettings, $dockerClient, false);
                         if (!empty($groupContainers)) {
-                            self::doBackupMethod('stopAll', $groupContainers);
+                            self::doBackupMethod('stopAll', $groupContainers, $abSettings, $dockerClient, $destination);
                             self::setCurrentContainerName($container, true);
                         }
                         continue;
                     }
 
                     self::setCurrentContainerName($container);
-                    $preContainerRet = ABHelper::handlePrePostScript($abSettings->preContainerBackupScript, 'pre-container', $container['Name']);
+                    $preContainerRet = self::handlePrePostScript($abSettings->preContainerBackupScript, 'pre-container', $container['Name']);
                     if ($preContainerRet === 2) {
-                        self::backupLog("preContainer script decided to skip backup.");
+                        self::backupLog("preContainer script skipped backup.");
                         self::setCurrentContainerName($container, true);
                         continue;
                     }
 
-                    self::stopContainer($container);
-
+                    self::stopContainer($container, $abSettings, $dockerClient);
                     if (self::abortRequested()) {
                         return false;
                     }
 
-                    if (!self::backupContainer($container, $abDestination)) {
+                    if (!self::backupContainer($container, $destination, $abSettings, $dockerClient)) {
                         self::$errorOccured = true;
                     }
 
-                    ABHelper::handlePrePostScript($abSettings->postContainerBackupScript, 'post-container', $container['Name']);
-
+                    self::handlePrePostScript($abSettings->postContainerBackupScript, 'post-container', $container['Name']);
                     if (self::abortRequested()) {
                         return false;
                     }
 
-                    if (in_array($container['Name'], $dockerUpdateList)) {
-                        self::updateContainer($container['Name']);
+                    if (in_array($container['Name'], $updateList)) {
+                        self::updateContainer($container['Name'], $abSettings);
                     }
-
                     if (self::abortRequested()) {
                         return false;
                     }
 
-                    self::startContainer($container);
-
+                    self::startContainer($container, $dockerClient);
                     if (self::abortRequested()) {
                         return false;
                     }
                     self::setCurrentContainerName($container, true);
                 }
-                self::handlePrePostScript($abSettings->postBackupScript, 'post-backup', $abDestination);
-
+                self::handlePrePostScript($abSettings->postBackupScript, 'post-backup', $destination);
                 break;
         }
         return true;
     }
 
     /**
-     * resolves a container group. Special note goes to the param $reverse: We MUST reverse if the input order is NOT start-order oriented!
-     * @param $container
-     * @param $reverse
+     * Resolves a container group
+     * @param array $container
+     * @param ABSettings $abSettings
+     * @param DockerClient $dockerClient
+     * @param bool $reverse
      * @return array|false
      */
-    public static function resolveContainer($container, $reverse = false) {
-        global $dockerContainers, $abSettings;
+    public static function resolveContainer($container, $abSettings, $dockerClient, $reverse = false) {
+        $containers = $dockerClient->getDockerContainers();
         if ($container['isGroup']) {
             self::setCurrentContainerName($container);
             $groupMembers = $abSettings->getContainerGroups($container['Name']);
-            self::backupLog("Reached a group: " . $container['Name'], self::LOGLEVEL_DEBUG);
-            $sortedGroupContainers = self::sortContainers($dockerContainers, $abSettings->containerGroupOrder[$container['Name']], $reverse, true, $groupMembers);
-            self::backupLog("Containers in this group: " . implode(', ', array_column($sortedGroupContainers, 'Name')), self::LOGLEVEL_DEBUG);
+            self::backupLog("Reached group: {$container['Name']}", self::LOGLEVEL_DEBUG);
+            $sortedGroupContainers = self::sortContainers($containers, $abSettings->containerGroupOrder[$container['Name']] ?? [], $reverse, true, $groupMembers, $abSettings);
+            self::backupLog("Group containers: " . implode(', ', array_column($sortedGroupContainers, 'Name')), self::LOGLEVEL_DEBUG);
             return $sortedGroupContainers;
         }
         return false;
     }
 
+    /**
+     * Sets current container name for logging
+     * @param array|null $container
+     * @param bool $remove
+     * @return void
+     */
     public static function setCurrentContainerName($container, $remove = false) {
         if (empty($container)) {
             self::$currentContainerName = [];
@@ -799,22 +743,19 @@ class ABHelper {
                 } else {
                     self::$currentContainerName[$lastKey] = '';
                 }
-
             } else {
                 self::$currentContainerName = [];
             }
-
         } else {
             if ($container['isGroup']) {
-                $lastElem                     = array_pop(self::$currentContainerName);
+                $lastElem = array_pop(self::$currentContainerName);
                 self::$currentContainerName[] = $container['Name'];
                 self::$currentContainerName[] = $lastElem;
             } else {
-                $lastKey                              = array_key_last(self::$currentContainerName);
+                $lastKey = array_key_last(self::$currentContainerName);
                 self::$currentContainerName[$lastKey] = $container['Name'];
             }
         }
-
         self::$currentContainerName = array_values(self::$currentContainerName);
     }
 }

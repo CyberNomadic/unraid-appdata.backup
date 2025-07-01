@@ -317,9 +317,10 @@ if (($code ?? 0) != 0) {
         <dt><b>Use Compression?</b></dt>
         <dd><select id='compression' name="compression" data-setting="<?= $abSettings->compression ?>"
                     onchange="checkMultiCoreCpuCount();">
-                <option value='no'>No</option>
-                <option value='yes'>Yes, normal</option>
-                <option value='yesMulticore'>Yes, multicore</option>
+                <option value='no'>No (Tarball)</option>
+                <option value='noFolders'>No (Folders)</option>    
+                <option value='yes'>Yes (Normal)</option>
+                <option value='yesMulticore'>Yes (Multicore)</option>
             </select>
         </dd>
     </dl>
@@ -341,8 +342,10 @@ if (($code ?? 0) != 0) {
     </dl>
 
     <blockquote class='inline_help'>
-        <p><b>Yes, normal</b>: Uses normal gzip compression</p>
-        <p><b>Yes, multicore</b>: Uses <a href="https://facebook.github.io/zstd/" target="_blank">zstdmt</a> for
+        <p><b>No (Tarball)</b>: Files are still put into a tarball archive, but no compression is applied.</p>
+        <p><b>No (Folders)</b>: Files are copied via rsync, this is ment to be used for incremental backups.</p>
+        <p><b>Yes (Normal)</b>: Uses normal gzip compression</p>
+        <p><b>Yes (Multicore)</b>: Uses <a href="https://facebook.github.io/zstd/" target="_blank">zstdmt</a> for
             compression. Please
             note, that this <i>could</i> decrease other system services during backup.</p>
     </blockquote>
