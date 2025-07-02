@@ -19,7 +19,7 @@
 
 ###2025.07.01b1
     - 🔧 Rewrote backup script so that it will be easier to work with.
-    - ➕ Added UI option for folders.
+    - ➕ Added initial early support for backing up via rsync. (Restoration unfinished.)
 ###2025.05.23b1
 - 🩹 Fix backup of containers which have [Tailscale enabled](https://github.com/Commifreak/unraid-appdata.backup/pull/50)
 - ➕ The plugin now inserts a higher limit for PHP's `max_input_vars` to deal with the settings-form saving issue

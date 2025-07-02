@@ -246,7 +246,7 @@ class ABHelper {
      * @return array Sorted containers
      */
     public static function sortContainers($containers, $order, $reverse = false, $removeSkipped = true, array $group = [], ?ABSettings $abSettings = null) {
-        $abSettings = $abSettings ?? new ABSettings(); // Default to new instance if not provided
+        $abSettings = $abSettings ?? new ABSettings();
 
         foreach ($containers as $key => $container) {
             $containers[$key]['isGroup'] = false;
@@ -294,7 +294,7 @@ class ABHelper {
     }
 
     /**
-     * Backs up a container's volumes
+     * Backs up a container's volumes using rsync or tar based on compression setting
      * @param array $container
      * @param string $destination
      * @param ABSettings $abSettings
@@ -312,14 +312,26 @@ class ABHelper {
             return true;
         }
 
-        if ($containerSettings['backupExtVolumes'] == 'no') {
-            self::backupLog("Excluding external volumes for {$container['Name']}...");
-            $volumes = array_filter($volumes, fn($volume) => self::isVolumeWithinAppdata($volume, $abSettings));
+        // Separate appdata and external volumes
+        $appdataVolumes = [];
+        $externalVolumes = [];
+        if ($containerSettings['backupExtVolumes'] == 'yes') {
+            foreach ($volumes as $volume) {
+                if (self::isVolumeWithinAppdata($volume, $abSettings)) {
+                    $appdataVolumes[] = $volume;
+                } else {
+                    $externalVolumes[] = $volume;
+                }
+            }
         } else {
-            self::backupLog("Including external volumes for {$container['Name']}.");
+            self::backupLog("Excluding external volumes for {$container['Name']}...");
+            $appdataVolumes = array_filter($volumes, fn($volume) => self::isVolumeWithinAppdata($volume, $abSettings));
         }
 
-        $tarExcludes = ['--exclude ' . escapeshellarg('/usr/local/share/docker/tailscale_container_hook')];
+        self::backupLog("Appdata volumes: " . implode(", ", $appdataVolumes), self::LOGLEVEL_DEBUG);
+        self::backupLog("External volumes: " . implode(", ", $externalVolumes), self::LOGLEVEL_DEBUG);
+
+        $excludes = ['--exclude=' . escapeshellarg('/usr/local/share/docker/tailscale_container_hook')];
         if (!empty($containerSettings['exclude'])) {
             self::backupLog("Container excludes: " . implode(", ", $containerSettings['exclude']), self::LOGLEVEL_DEBUG);
             foreach ($containerSettings['exclude'] as $exclude) {
@@ -328,9 +340,11 @@ class ABHelper {
                     if (in_array($exclude, $volumes)) {
                         self::backupLog("Exclusion '{$exclude}' matches a volume - ignoring.", self::LOGLEVEL_DEBUG);
                         $volumes = array_diff($volumes, [$exclude]);
+                        $appdataVolumes = array_diff($appdataVolumes, [$exclude]);
+                        $externalVolumes = array_diff($externalVolumes, [$exclude]);
                         continue;
                     }
-                    $tarExcludes[] = '--exclude ' . escapeshellarg($exclude);
+                    $excludes[] = '--exclude=' . escapeshellarg($exclude);
                 }
             }
         }
@@ -338,79 +352,152 @@ class ABHelper {
         if (!empty($abSettings->globalExclusions)) {
             self::backupLog("Global excludes: " . print_r($abSettings->globalExclusions, true), self::LOGLEVEL_DEBUG);
             foreach ($abSettings->globalExclusions as $globalExclusion) {
-                $tarExcludes[] = '--exclude ' . escapeshellarg($globalExclusion);
+                $excludes[] = '--exclude=' . escapeshellarg($globalExclusion);
             }
         }
 
-        if (empty($volumes)) {
+        if (empty($appdataVolumes) && empty($externalVolumes)) {
             self::backupLog("No volumes to back up for {$container['Name']}. Consider ignoring this container.", self::LOGLEVEL_WARN);
             return true;
         }
 
-        self::backupLog("Volumes to back up: " . implode(", ", $volumes));
+        self::backupLog("Volumes to back up - Appdata: " . implode(", ", $appdataVolumes) . ", External: " . implode(", ", $externalVolumes));
 
-        $destination = $destination . "/" . $container['Name'] . '.tar';
-        $tarVerifyOptions = array_merge($tarExcludes, ['--diff']);
-        $tarOptions = array_merge($tarExcludes, ['-c', '-P']);
+        $backupTimer = time();
+        $success = true;
 
-        if ($abSettings->ignoreExclusionCase == 'yes') {
-            $tarOptions[] = $tarVerifyOptions[] = '--ignore-case';
-        }
+        if ($abSettings->compression == 'noFolders') {
+            // Use rsync for noFolders (no compression, just copy folders)
+            $backupDir = "$destination/{$container['Name']}";
+            mkdir($backupDir, 0755, true);
+            self::backupLog("Backing up {$container['Name']} using rsync...");
 
-        switch ($abSettings->compression) {
-            case 'yes':
-                $tarOptions[] = '-z';
-                $destination .= '.gz';
-                break;
-            case 'yesMulticore':
-                $tarOptions[] = '-I "zstd -T' . $abSettings->compressionCpuLimit . '"';
-                $destination .= '.zst';
-                break;
-        }
-
-        self::backupLog("Target archive: {$destination}", self::LOGLEVEL_DEBUG);
-        $tarOptions[] = $tarVerifyOptions[] = '-f ' . escapeshellarg($destination);
-        $tarOptions = array_merge($tarOptions, array_map('escapeshellarg', $volumes));
-        $tarVerifyOptions = array_merge($tarVerifyOptions, array_map('escapeshellarg', $volumes));
-
-        $finalTarOptions = implode(" ", $tarOptions);
-        $finalTarVerifyOptions = implode(" ", $tarVerifyOptions);
-
-        self::backupLog("Generated tar command: {$finalTarOptions}", self::LOGLEVEL_DEBUG);
-        self::backupLog("Backing up {$container['Name']}...");
-
-        $tarBackupTimer = time();
-        exec("tar {$finalTarOptions} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
-        self::backupLog("Tar output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
-
-        if ($resultcode > 0) {
-            self::backupLog("tar creation failed: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
-            foreach ($volumes as $volume) {
-                exec("lsof -nl +D " . escapeshellarg($volume), $lsofOutput);
-                self::backupLog("lsof({$volume}): " . print_r($lsofOutput, true), self::LOGLEVEL_DEBUG);
+            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats'];
+            if ($abSettings->ignoreExclusionCase == 'yes') {
+                $rsyncOptions[] = '--no-i-r';
             }
-            return $containerSettings['ignoreBackupErrors'] == 'yes';
+            $rsyncOptions = array_merge($rsyncOptions, $excludes);
+            $rsyncBaseCmd = "rsync " . implode(" ", $rsyncOptions);
+
+            // Backup all volumes to their relative paths
+            $allVolumes = array_merge($appdataVolumes, $externalVolumes);
+            foreach ($allVolumes as $volume) {
+                // Convert volume path to relative path (e.g., /mnt/user/appdata/privatebin/ -> mnt/user/appdata/privatebin/)
+                $relativePath = ltrim($volume, '/');
+                $volumeDest = "$backupDir/$relativePath";
+                // Create parent directory for the volume
+                mkdir(dirname($volumeDest), 0755, true);
+                $rsyncCmd = "$rsyncBaseCmd " . escapeshellarg("$volume/") . " " . escapeshellarg($volumeDest);
+                self::backupLog("Executing rsync for volume $volume to $volumeDest: $rsyncCmd", self::LOGLEVEL_DEBUG);
+                exec("$rsyncCmd 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
+                self::backupLog("rsync output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
+
+                if ($resultcode > 0) {
+                    self::backupLog("rsync failed for volume $volume: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
+                    exec("lsof -nl +D " . escapeshellarg($volume), $lsofOutput);
+                    self::backupLog("lsof($volume): " . print_r($lsofOutput, true), self::LOGLEVEL_DEBUG);
+                    $success = $containerSettings['ignoreBackupErrors'] == 'yes';
+                }
+            }
+
+            if (!$success) {
+                exec("rm -rf " . escapeshellarg($backupDir));
+                return $success;
+            }
+        } else {
+            // Use tar for compression == 'yes' or 'yesMulticore'
+            $archiveFile = "$destination/{$container['Name']}.tar";
+            $tarVerifyOptions = array_merge($excludes, ['--diff']);
+            $tarOptions = array_merge($excludes, ['-c', '-P']);
+
+            if ($abSettings->ignoreExclusionCase == 'yes') {
+                $tarOptions[] = $tarVerifyOptions[] = '--ignore-case';
+            }
+
+            switch ($abSettings->compression) {
+                case 'yes':
+                    $tarOptions[] = '-z';
+                    $archiveFile .= '.gz';
+                    break;
+                case 'yesMulticore':
+                    $tarOptions[] = '-I "zstd -T' . $abSettings->compressionCpuLimit . '"';
+                    $archiveFile .= '.zst';
+                    break;
+            }
+
+            self::backupLog("Target archive: {$archiveFile}", self::LOGLEVEL_DEBUG);
+            $tarOptions[] = $tarVerifyOptions[] = '-f ' . escapeshellarg($archiveFile);
+            $tarOptions = array_merge($tarOptions, array_map('escapeshellarg', $volumes));
+            $tarVerifyOptions = array_merge($tarVerifyOptions, array_map('escapeshellarg', $volumes));
+
+            $finalTarOptions = implode(" ", $tarOptions);
+            $finalTarVerifyOptions = implode(" ", $tarVerifyOptions);
+
+            self::backupLog("Generated tar command: {$finalTarOptions}", self::LOGLEVEL_DEBUG);
+            self::backupLog("Backing up {$container['Name']}...");
+
+            exec("tar {$finalTarOptions} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
+            self::backupLog("tar output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
+
+            if ($resultcode > 0) {
+                self::backupLog("tar creation failed: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
+                foreach ($volumes as $volume) {
+                    exec("lsof -nl +D " . escapeshellarg($volume), $lsofOutput);
+                    self::backupLog("lsof($volume): " . print_r($lsofOutput, true), self::LOGLEVEL_DEBUG);
+                }
+                return $containerSettings['ignoreBackupErrors'] == 'yes';
+            }
         }
 
-        self::backupLog("Backup created (took " . gmdate("H:i:s", time() - $tarBackupTimer) . ")");
+        self::backupLog("Backup created (took " . gmdate("H:i:s", time() - $backupTimer) . ")");
 
         if (self::abortRequested()) {
+            if ($abSettings->compression == 'noFolders') {
+                exec("rm -rf " . escapeshellarg("$destination/{$container['Name']}"));
+            } else {
+                unlink($archiveFile);
+            }
             return true;
         }
 
         if ($containerSettings['verifyBackup'] == 'yes') {
-            $tarVerifyTimer = time();
+            $verifyTimer = time();
             self::backupLog("Verifying backup...");
-            self::backupLog("Verify command: {$finalTarVerifyOptions}", self::LOGLEVEL_DEBUG);
+            $verifySuccess = true;
 
-            exec("tar {$finalTarVerifyOptions} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
-            self::backupLog("Tar output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
+            if ($abSettings->compression == 'noFolders') {
+                // Verify all volumes
+                $allVolumes = array_merge($appdataVolumes, $externalVolumes);
+                foreach ($allVolumes as $volume) {
+                    $relativePath = ltrim($volume, '/');
+                    $volumeDest = "$backupDir/$relativePath";
+                    $rsyncVerifyCmd = "rsync --dry-run --checksum -a --no-links --safe-links " . implode(" ", $excludes) . " " . escapeshellarg("$volume/") . " " . escapeshellarg($volumeDest);
+                    self::backupLog("Verify command for volume $volume: $rsyncVerifyCmd", self::LOGLEVEL_DEBUG);
+                    exec("$rsyncVerifyCmd 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
+                    self::backupLog("rsync verify output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
 
-            if ($resultcode > 0) {
-                self::backupLog("tar verification failed: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
+                    if ($resultcode > 0 && !empty($output)) {
+                        self::backupLog("Verification failed for volume $volume: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
+                        $verifySuccess = $containerSettings['ignoreBackupErrors'] == 'yes';
+                    }
+                }
+            } else {
+                self::backupLog("Verify command: {$finalTarVerifyOptions}", self::LOGLEVEL_DEBUG);
+                exec("tar {$finalTarVerifyOptions} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);
+                self::backupLog("tar verify output: " . implode('; ', $output), self::LOGLEVEL_DEBUG);
+
+                if ($resultcode > 0) {
+                    self::backupLog("tar verification failed: " . implode('; ', $output), $containerSettings['ignoreBackupErrors'] == 'yes' ? self::LOGLEVEL_INFO : self::LOGLEVEL_ERR);
+                    $verifySuccess = $containerSettings['ignoreBackupErrors'] == 'yes';
+                }
+            }
+
+            if ($verifySuccess) {
+                self::backupLog("Verification completed (took " . gmdate("H:i:s", time() - $verifyTimer) . ")");
+            } else {
                 foreach ($volumes as $volume) {
                     exec("lsof -nl +D " . escapeshellarg($volume), $lsofOutput);
-                    self::backupLog("lsof({$volume}): " . print_r($lsofOutput, true), self::LOGLEVEL_DEBUG);
+                    self::backupLog("lsof($volume): " . print_r($lsofOutput, true), self::LOGLEVEL_DEBUG);
                 }
                 $nowRunning = $dockerClient->getDockerContainers();
                 foreach ($nowRunning as $nowRunningContainer) {
@@ -418,9 +505,8 @@ class ABHelper {
                         self::backupLog("After verify: " . print_r($nowRunningContainer, true), self::LOGLEVEL_DEBUG);
                     }
                 }
-                return $containerSettings['ignoreBackupErrors'] == 'yes';
+                return $verifySuccess;
             }
-            self::backupLog("Verification completed (took " . gmdate("H:i:s", time() - $tarVerifyTimer) . ")");
         } else {
             self::backupLog("Skipping verification for {$container['Name']} as configured.", self::LOGLEVEL_WARN);
         }
@@ -461,7 +547,7 @@ class ABHelper {
      * @return array
      */
     public static function getContainerVolumes($container, $skipExclusionCheck = false, ?ABSettings $abSettings = null) {
-        $abSettings = $abSettings ?? new ABSettings(); // Default to new instance if not provided
+        $abSettings = $abSettings ?? new ABSettings();
         $volumes = [];
         foreach ($container['Volumes'] ?? [] as $volume) {
             $hostPath = rtrim(explode(":", $volume)[0], '/');
@@ -515,7 +601,7 @@ class ABHelper {
      * @return bool
      */
     public static function isVolumeWithinAppdata($volume, ?ABSettings $abSettings = null) {
-        $abSettings = $abSettings ?? new ABSettings(); // Default to new instance if not provided
+        $abSettings = $abSettings ?? new ABSettings();
         foreach ($abSettings->allowedSources as $appdataPath) {
             if (str_starts_with($volume, $appdataPath . '/')) {
                 self::backupLog("Volume '{$volume}' is within '{$appdataPath}'.", self::LOGLEVEL_DEBUG);
@@ -569,7 +655,7 @@ class ABHelper {
         $containers = $containerListOverride ?: $dockerClient->getDockerContainers();
         $sortedStopContainers = self::sortContainers($containers, $abSettings->containerOrder, true, true, [], $abSettings);
         $sortedStartContainers = self::sortContainers($containers, $abSettings->containerOrder, false, true, [], $abSettings);
-        $updateList = []; // Managed in backup.php
+        $updateList = [];
 
         self::backupLog(__METHOD__ . ': Override containers: ' . implode(', ', array_column(($containerListOverride ?: $sortedStopContainers), 'Name')), self::LOGLEVEL_DEBUG);
 
