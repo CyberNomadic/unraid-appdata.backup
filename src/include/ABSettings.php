@@ -24,7 +24,6 @@ class ABSettings {
     public static $emhttpVars = '/var/local/emhttp/var.ini';
     public static $qemuFolder = '/etc/libvirt/qemu';
     public static $externalCmdPidCapture = '';
-
     public string|null $containerHandling = 'oneAfterTheOther';
     public string|null $backupMethod = 'timestamp';
     public string|int $deleteBackupsOlderThan = '7';
@@ -317,24 +316,22 @@ class ABSettings {
      * Initializes beta-specific settings if running in beta mode
      * @return void
      */
-    private static function initializeBetaSettings(): void {
-        if (str_contains(__DIR__, 'appdata.backup.beta')) {
-            self::$appName .= '.beta';
-            self::$pluginDir .= '.beta';
-            self::$tempFolder .= '.beta';
-            self::$supportUrl = 'https://forums.unraid.net/topic/136995-pluginbeta-appdatabackup/';
-            ABHelper::backupLog("DEBUG: Running beta version, appName = " . self::$appName . ", pluginDir = " . self::$pluginDir . ", tempFolder = " . self::$tempFolder);
-        } else {
-            ABHelper::backupLog("DEBUG: Running non-beta version, appName = " . self::$appName . ", pluginDir = " . self::$pluginDir . ", tempFolder = " . self::$tempFolder);
-        }
-
-        // Initialize externalCmdPidCapture
-        self::$externalCmdPidCapture = '& echo $! > ' . escapeshellarg(self::$tempFolder . '/' . self::$stateExtCmd) . ' && wait $!';
-
-        // Create temp folder if it doesn't exist
-        if (!file_exists(self::$tempFolder)) {
-            mkdir(self::$tempFolder, 0755, true);
-            ABHelper::backupLog("DEBUG: Created temp folder: " . self::$tempFolder);
-        }
+   private static function initializeBetaSettings(): void {
+    if (str_contains(__DIR__, 'appdata.backup.beta')) {
+        self::$appName = str_ends_with(self::$appName, '.beta') ? self::$appName : self::$appName . '.beta';
+        self::$pluginDir = str_ends_with(self::$pluginDir, '.beta') ? self::$pluginDir : self::$pluginDir . '.beta';
+        self::$tempFolder = str_ends_with(self::$tempFolder, '.beta') ? self::$tempFolder : self::$tempFolder . '.beta';
+        self::$supportUrl = 'https://forums.unraid.net/topic/136995-pluginbeta-appdatabackup/';
+        ABHelper::backupLog("DEBUG: Running beta version, appName = " . self::$appName . ", pluginDir = " . self::$pluginDir . ", tempFolder = " . self::$tempFolder);
     }
+
+    // Initialize externalCmdPidCapture
+    self::$externalCmdPidCapture = '& echo $! > ' . escapeshellarg(self::$tempFolder . '/' . self::$stateExtCmd) . ' && wait $!';
+
+    // Create temp folder if it doesn't exist
+    if (!file_exists(self::$tempFolder)) {
+        mkdir(self::$tempFolder, 0755, true);
+        ABHelper::backupLog("DEBUG: Created temp folder: " . self::$tempFolder);
+    }
+}
 }
