@@ -1,5 +1,5 @@
 <?php
-$beta = '.beta';
+$beta = '';
 if (str_contains($_SERVER['REQUEST_URI'], 'Beta')) {
     $beta = '.beta';
 }

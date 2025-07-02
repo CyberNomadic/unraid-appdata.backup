@@ -1,5 +1,4 @@
 <?php
-
 namespace unraid\plugins\AppdataBackup;
 
 require_once __DIR__ . '/ABHelper.php';
@@ -9,25 +8,20 @@ require_once __DIR__ . '/ABHelper.php';
  */
 class ABSettings {
 
-    public static $appName = 'appdata.backup.beta';
-    public static $pluginDir = '/boot/config/plugins/appdata.backup.beta';
+    public static $appName = 'appdata.backup';
+    public static $pluginDir = '/boot/config/plugins/appdata.backup';
     public static $settingsFile = 'config.json';
     public static $unraidAutostartFile = "/var/lib/docker/unraid-autostart";
     public static $settingsVersion = 4; // Updated to version 4 for incremental backup support
     public static $cronFile = 'appdata_backup.cron';
     public static $supportUrl = 'https://forums.unraid.net/topic/137710-plugin-appdatabackup/';
-
     public static $tempFolder = '/tmp/appdata.backup';
-
     public static $logfile = 'ab.log';
     public static $debugLogFile = 'ab.debug.log';
-
     public static $stateFileScriptRunning = 'running';
     public static $stateFileAbort = 'abort';
     public static $stateExtCmd = 'extCmd';
-
     public static $emhttpVars = '/var/local/emhttp/var.ini';
-
     public static $qemuFolder = '/etc/libvirt/qemu';
     public static $externalCmdPidCapture = '';
 
@@ -35,7 +29,6 @@ class ABSettings {
     public string|null $backupMethod = 'timestamp';
     public string|int $deleteBackupsOlderThan = '7';
     public string|int $keepMinBackups = '3';
-
     /**
      * @var array|string[] Allowed sources - WITHOUT trailing slash!
      */
@@ -80,13 +73,19 @@ class ABSettings {
     public string $updateLogWanted = 'no';
     public string $ignoreExclusionCase = 'no';
 
+
     public function __construct() {
+        // Initialize beta settings
+        self::initializeBetaSettings();
+
+        // Load and migrate config
         self::migrateConfig();
 
         $sFile = self::getConfigPath();
+        ABHelper::backupLog("DEBUG: Loading config from {$sFile}");
         if (file_exists($sFile)) {
             $config = json_decode(file_get_contents($sFile), true);
-            if ($config) {
+            if ($config && json_last_error() === JSON_ERROR_NONE) {
                 foreach ($config as $key => $value) {
                     if (property_exists($this, $key)) {
                         switch ($key) {
@@ -148,7 +147,12 @@ class ABSettings {
                         }
                     }
                 }
+                ABHelper::backupLog("DEBUG: Config loaded, backupMethod = {$this->backupMethod}, destination = {$this->destination}");
+            } else {
+                ABHelper::backupLog("DEBUG: Failed to parse config.json", ABHelper::LOGLEVEL_ERR);
             }
+        } else {
+            ABHelper::backupLog("DEBUG: config.json not found at {$sFile}", ABHelper::LOGLEVEL_ERR);
         }
         ABHelper::$targetLogLevel = $this->notification;
 
@@ -308,5 +312,29 @@ class ABSettings {
             }
         }
         return $group !== null ? ($groups[$group] ?? []) : $groups;
+    }
+        /**
+     * Initializes beta-specific settings if running in beta mode
+     * @return void
+     */
+    private static function initializeBetaSettings(): void {
+        if (str_contains(__DIR__, 'appdata.backup.beta')) {
+            self::$appName .= '.beta';
+            self::$pluginDir .= '.beta';
+            self::$tempFolder .= '.beta';
+            self::$supportUrl = 'https://forums.unraid.net/topic/136995-pluginbeta-appdatabackup/';
+            ABHelper::backupLog("DEBUG: Running beta version, appName = " . self::$appName . ", pluginDir = " . self::$pluginDir . ", tempFolder = " . self::$tempFolder);
+        } else {
+            ABHelper::backupLog("DEBUG: Running non-beta version, appName = " . self::$appName . ", pluginDir = " . self::$pluginDir . ", tempFolder = " . self::$tempFolder);
+        }
+
+        // Initialize externalCmdPidCapture
+        self::$externalCmdPidCapture = '& echo $! > ' . escapeshellarg(self::$tempFolder . '/' . self::$stateExtCmd) . ' && wait $!';
+
+        // Create temp folder if it doesn't exist
+        if (!file_exists(self::$tempFolder)) {
+            mkdir(self::$tempFolder, 0755, true);
+            ABHelper::backupLog("DEBUG: Created temp folder: " . self::$tempFolder);
+        }
     }
 }
