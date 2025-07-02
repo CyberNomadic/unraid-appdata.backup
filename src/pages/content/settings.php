@@ -253,8 +253,8 @@ if (($code ?? 0) != 0) {
     <input type="hidden" name="csrf_token" value="<?= _var($var, 'csrf_token') ?>"/>
     <input type="hidden" name="settingsVersion" value="<?= ABSettings::$settingsVersion ?>"/>
     <dl>
-        <dt><b>Backup type</b></dt>
-        <dd><select id="backupMethod" name="backupMethod" data-setting="<?= $abSettings->backupMethod ?>">
+        <dt><b>Container Handling</b></dt>
+        <dd><select id="containerHandling" name="containerHandling" data-setting="<?= $abSettings->containerHandling ?>">
                 <option value="stopAll">Stop all containers, backup, start all</option>
                 <option value="oneAfterTheOther">Stop, backup, start for each container</option>
             </select></dd>
@@ -262,6 +262,15 @@ if (($code ?? 0) != 0) {
     <blockquote class='inline_help'>
         <p>The plugin takes note of not started containers before backup and leaves them stopped afterwards.</p>
     </blockquote>
+    <dl>
+            <dt><b>Backup Method</b></dt>
+            <dd>
+                <select id="backupMethod" name="backupMethod" data-setting="<?= $abSettings->backupMethod ?>">
+                    <option value="timestamp">Timestamp</option>
+                    <option value="incremental">Incremental</option>
+                </select>
+            </dd>
+    </dl>
 
     <dl>
 

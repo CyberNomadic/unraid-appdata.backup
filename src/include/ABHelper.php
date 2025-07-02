@@ -7,7 +7,8 @@ require_once __DIR__ . '/ABSettings.php';
 /**
  * Helper class for Appdata Backup plugin utilities
  */
-class ABHelper {
+class ABHelper
+{
 
     const LOGLEVEL_DEBUG = 'debug';
     const LOGLEVEL_INFO = 'info';
@@ -22,7 +23,7 @@ class ABHelper {
     private static $emojiLevels = [
         self::LOGLEVEL_INFO => 'ℹ️',
         self::LOGLEVEL_WARN => '⚠️',
-        self::LOGLEVEL_ERR  => '❌'
+        self::LOGLEVEL_ERR => '❌'
     ];
     public static $errorOccured = false;
     private static array $currentContainerName = [];
@@ -33,7 +34,8 @@ class ABHelper {
      * @param string $string
      * @return void
      */
-    public static function logger($string) {
+    public static function logger($string)
+    {
         shell_exec("logger -t 'Appdata Backup' " . escapeshellarg($string));
     }
 
@@ -41,7 +43,8 @@ class ABHelper {
      * Checks if the array is online
      * @return bool
      */
-    public static function isArrayOnline() {
+    public static function isArrayOnline()
+    {
         $emhttpVars = parse_ini_file(ABSettings::$emhttpVars);
         return $emhttpVars && $emhttpVars['fsState'] === 'Started';
     }
@@ -52,7 +55,8 @@ class ABHelper {
      * @param mixed ...$args
      * @return int|bool
      */
-    public static function handlePrePostScript($script, ...$args) {
+    public static function handlePrePostScript($script, ...$args)
+    {
         if (empty($script)) {
             self::backupLog("Not executing script: Not set!", self::LOGLEVEL_DEBUG);
             return true;
@@ -90,7 +94,8 @@ class ABHelper {
      * @param bool $skipDate
      * @return void
      */
-    public static function backupLog(string $msg, string $level = self::LOGLEVEL_INFO, bool $newLine = true, bool $skipDate = false) {
+    public static function backupLog(string $msg, string $level = self::LOGLEVEL_INFO, bool $newLine = true, bool $skipDate = false)
+    {
         if (!self::scriptRunning() || self::scriptRunning() != getmypid()) {
             return;
         }
@@ -122,7 +127,8 @@ class ABHelper {
      * @param string $type
      * @return void
      */
-    public static function notify($subject, $description, $message = "", $type = "normal") {
+    public static function notify($subject, $description, $message = "", $type = "normal")
+    {
         $command = '/usr/local/emhttp/webGui/scripts/notify -e "Appdata Backup" -s "' . $subject . '" -d "' . $description . '" -m "' . $message . '" -i "' . $type . '" -l "/Settings/AB.Main"';
         shell_exec($command);
     }
@@ -134,7 +140,8 @@ class ABHelper {
      * @param DockerClient $dockerClient
      * @return bool
      */
-    public static function stopContainer($container, $abSettings, $dockerClient) {
+    public static function stopContainer($container, $abSettings, $dockerClient)
+    {
         $containerSettings = $abSettings->getContainerSpecificSettings($container['Name']);
 
         if ($container['Running'] && !$container['Paused']) {
@@ -173,7 +180,8 @@ class ABHelper {
      * @param DockerClient $dockerClient
      * @return void
      */
-    public static function startContainer($container, $dockerClient) {
+    public static function startContainer($container, $dockerClient)
+    {
         if (in_array($container['Name'], self::$skipStartContainers)) {
             self::backupLog("Starting {$container['Name']} is ignored, as it was not started before or should not be started.");
             return;
@@ -245,7 +253,8 @@ class ABHelper {
      * @param ABSettings|null $abSettings Settings object
      * @return array Sorted containers
      */
-    public static function sortContainers($containers, $order, $reverse = false, $removeSkipped = true, array $group = [], ?ABSettings $abSettings = null) {
+    public static function sortContainers($containers, $order, $reverse = false, $removeSkipped = true, array $group = [], ?ABSettings $abSettings = null)
+    {
         $abSettings = $abSettings ?? new ABSettings();
 
         foreach ($containers as $key => $container) {
@@ -266,7 +275,7 @@ class ABHelper {
                 }
                 $appendinggroups['__grp__' . $groupName] = [
                     'isGroup' => true,
-                    'Name'    => $groupName
+                    'Name' => $groupName
                 ];
             }
             $_containers = $_containers + $appendinggroups;
@@ -301,7 +310,8 @@ class ABHelper {
      * @param DockerClient $dockerClient
      * @return bool
      */
-    public static function backupContainer($container, $destination, $abSettings, $dockerClient) {
+    public static function backupContainer($container, $destination, $abSettings, $dockerClient)
+    {
         self::backupLog("Backup {$container['Name']} - Volume info: " . print_r($container['Volumes'], true), self::LOGLEVEL_DEBUG);
 
         $volumes = self::getContainerVolumes($container, false, $abSettings);
@@ -518,7 +528,8 @@ class ABHelper {
      * @param bool $externalCmd
      * @return string|bool
      */
-    public static function scriptRunning($externalCmd = false) {
+    public static function scriptRunning($externalCmd = false)
+    {
         $filePath = ABSettings::$tempFolder . '/' . ($externalCmd ? ABSettings::$stateExtCmd : ABSettings::$stateFileScriptRunning);
         if (!file_exists($filePath)) {
             return false;
@@ -535,7 +546,8 @@ class ABHelper {
      * Checks if abort is requested
      * @return bool
      */
-    public static function abortRequested() {
+    public static function abortRequested()
+    {
         return file_exists(ABSettings::$tempFolder . '/' . ABSettings::$stateFileAbort);
     }
 
@@ -546,7 +558,8 @@ class ABHelper {
      * @param ABSettings|null $abSettings
      * @return array
      */
-    public static function getContainerVolumes($container, $skipExclusionCheck = false, ?ABSettings $abSettings = null) {
+    public static function getContainerVolumes($container, $skipExclusionCheck = false, ?ABSettings $abSettings = null)
+    {
         $abSettings = $abSettings ?? new ABSettings();
         $volumes = [];
         foreach ($container['Volumes'] ?? [] as $volume) {
@@ -600,7 +613,8 @@ class ABHelper {
      * @param ABSettings|null $abSettings
      * @return bool
      */
-    public static function isVolumeWithinAppdata($volume, ?ABSettings $abSettings = null) {
+    public static function isVolumeWithinAppdata($volume, ?ABSettings $abSettings = null)
+    {
         $abSettings = $abSettings ?? new ABSettings();
         foreach ($abSettings->allowedSources as $appdataPath) {
             if (str_starts_with($volume, $appdataPath . '/')) {
@@ -620,7 +634,8 @@ class ABHelper {
      * @param array $errcontext
      * @return bool
      */
-    public static function errorHandler(int $errno, string $errstr, string $errfile, int $errline, array $errcontext = []): bool {
+    public static function errorHandler(int $errno, string $errstr, string $errfile, int $errline, array $errcontext = []): bool
+    {
         $errStr = "PHP error: {$errno} / {$errstr} {$errfile}:{$errline} with context: " . json_encode($errcontext);
         file_put_contents("/tmp/appdata.backup_phperr", $errStr . PHP_EOL, FILE_APPEND);
         self::backupLog("PHP-ERROR: {$errno} / {$errstr} {$errfile}:{$errline}", self::LOGLEVEL_DEBUG);
@@ -633,7 +648,8 @@ class ABHelper {
      * @param ABSettings $abSettings
      * @return void
      */
-    public static function updateContainer($name, $abSettings) {
+    public static function updateContainer($name, $abSettings)
+    {
         self::backupLog("Installing update for {$name}...");
         exec('/usr/local/emhttp/plugins/dynamix.docker.manager/scripts/update_container ' . escapeshellarg($name));
 
@@ -651,7 +667,8 @@ class ABHelper {
      * @param string $destination
      * @return bool
      */
-    public static function doBackupMethod($method, $containerListOverride, $abSettings, $dockerClient, $destination) {
+    public static function doContainerHandling($method, $containerListOverride, $abSettings, $dockerClient, $destination)
+    {
         $containers = $containerListOverride ?: $dockerClient->getDockerContainers();
         $sortedStopContainers = self::sortContainers($containers, $abSettings->containerOrder, true, true, [], $abSettings);
         $sortedStartContainers = self::sortContainers($containers, $abSettings->containerOrder, false, true, [], $abSettings);
@@ -736,7 +753,7 @@ class ABHelper {
                     if ($container['isGroup']) {
                         $groupContainers = self::resolveContainer($container, $abSettings, $dockerClient, false);
                         if (!empty($groupContainers)) {
-                            self::doBackupMethod('stopAll', $groupContainers, $abSettings, $dockerClient, $destination);
+                            self::doContainerHandling('stopAll', $groupContainers, $abSettings, $dockerClient, $destination);
                             self::setCurrentContainerName($container, true);
                         }
                         continue;
@@ -791,7 +808,8 @@ class ABHelper {
      * @param bool $reverse
      * @return array|false
      */
-    public static function resolveContainer($container, $abSettings, $dockerClient, $reverse = false) {
+    public static function resolveContainer($container, $abSettings, $dockerClient, $reverse = false)
+    {
         $containers = $dockerClient->getDockerContainers();
         if ($container['isGroup']) {
             self::setCurrentContainerName($container);
@@ -810,7 +828,8 @@ class ABHelper {
      * @param bool $remove
      * @return void
      */
-    public static function setCurrentContainerName($container, $remove = false) {
+    public static function setCurrentContainerName($container, $remove = false)
+    {
         if (empty($container)) {
             self::$currentContainerName = [];
             return;

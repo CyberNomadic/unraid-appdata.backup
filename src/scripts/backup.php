@@ -80,32 +80,56 @@ class AppdataBackup {
      * Validates prerequisites before starting backup
      * @throws Exception
      */
-    private function validatePrerequisites(): void {
-        if (!ABHelper::isArrayOnline()) {
-            throw new Exception("Array is not online");
-        }
+    /**
+ * Validates prerequisites before starting backup
+ * @throws Exception
+ */
+private function validatePrerequisites(): void {
+    if (!ABHelper::isArrayOnline()) {
+        throw new Exception("Array is not online");
+    }
 
-        if (!file_exists(ABSettings::getConfigPath())) {
-            throw new Exception("Configuration file not found");
-        }
+    if (!file_exists(ABSettings::getConfigPath())) {
+        throw new Exception("Configuration file not found");
+    }
 
-        if (empty($this->settings->destination)) {
-            throw new Exception("Backup destination not configured");
-        }
+    if (empty($this->settings->destination)) {
+        throw new Exception("Backup destination not configured");
+    }
 
-        $this->destination = rtrim($this->settings->destination, '/') . '/ab_' . date('Ymd_His');
-        
-        if (!file_exists($this->settings->destination) || !is_writable($this->settings->destination)) {
-            throw new Exception("Destination directory is not accessible or writable");
-        }
+    // Ensure the parent destination directory exists and is writable
+    $parentDestination = rtrim($this->settings->destination, '/');
+    if (!file_exists($parentDestination)) {
+        throw new Exception("Parent destination directory does not exist: {$parentDestination}");
+    }
+    if (!is_writable($parentDestination)) {
+        throw new Exception("Parent destination directory is not writable: {$parentDestination}");
+    }
 
-        if (!mkdir($this->destination)) {
+    // Set the backup destination based on backupMethod
+    if ($this->settings->backupMethod == "timestamp") {
+        $this->destination = $parentDestination . '/ab_' . date('Ymd_His');
+    } else {
+        $this->destination = $parentDestination;
+    }
+
+    // Create the destination directory if it doesn't exist
+    if (!file_exists($this->destination)) {
+        if (!mkdir($this->destination, 0775, true)) {
             throw new Exception("Failed to create destination directory: {$this->destination}");
         }
-
-        ABHelper::backupLog("Source paths: " . implode(', ', $this->settings->allowedSources));
-        ABHelper::backupLog("Destination: {$this->destination}");
+    } elseif (!is_dir($this->destination)) {
+        throw new Exception("Destination path exists but is not a directory: {$this->destination}");
     }
+
+    // Verify the destination directory is writable
+    if (!is_writable($this->destination)) {
+        throw new Exception("Destination directory is not writable: {$this->destination}");
+    }
+
+    ABHelper::backupLog("Source paths: " . implode(', ', $this->settings->allowedSources));
+    ABHelper::backupLog("Destination: {$this->destination}");
+}
 
     /**
      * Cleans up temporary folder
@@ -176,7 +200,7 @@ class AppdataBackup {
         // Execute backup
         $preBackupResult = ABHelper::handlePrePostScript($this->settings->preBackupScript, 'pre-backup', $this->destination);
         if ($preBackupResult !== 2) {
-            ABHelper::doBackupMethod($this->settings->backupMethod, null, $this->settings, $this->dockerClient, $this->destination);
+            ABHelper::doContainerHandling($this->settings->containerHandling, null, $this->settings, $this->dockerClient, $this->destination);
         } else {
             ABHelper::backupLog("Backup skipped by pre-backup script");
         }
@@ -466,4 +490,3 @@ class AppdataBackup {
 // Execute backup
 $backup = new AppdataBackup();
 exit($backup->run());
-?>
