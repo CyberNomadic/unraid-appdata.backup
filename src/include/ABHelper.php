@@ -9,7 +9,6 @@ require_once __DIR__ . '/ABSettings.php';
  */
 class ABHelper
 {
-
     const LOGLEVEL_DEBUG = 'debug';
     const LOGLEVEL_INFO = 'info';
     const LOGLEVEL_WARN = 'warning';
@@ -308,9 +307,10 @@ class ABHelper
      * @param string $destination
      * @param ABSettings $abSettings
      * @param DockerClient $dockerClient
+     * @param bool $isIncremental
      * @return bool
      */
-    public static function backupContainer($container, $destination, $abSettings, $dockerClient)
+    public static function backupContainer($container, $destination, $abSettings, $dockerClient, $isIncremental = false)
     {
         self::backupLog("Backup {$container['Name']} - Volume info: " . print_r($container['Volumes'], true), self::LOGLEVEL_DEBUG);
 
@@ -376,13 +376,15 @@ class ABHelper
         $backupTimer = time();
         $success = true;
 
-        if ($abSettings->compression == 'noFolders') {
-            // Use rsync for noFolders (no compression, just copy folders)
+        if ($isIncremental || $abSettings->compression == 'noFolders') {
+            // Use rsync for incremental backups or noFolders compression
             $backupDir = "$destination/{$container['Name']}";
-            mkdir($backupDir, 0755, true);
+            if (!file_exists($backupDir)) {
+                mkdir($backupDir, 0755, true);
+            }
             self::backupLog("Backing up {$container['Name']} using rsync...");
 
-            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats'];
+            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
             if ($abSettings->ignoreExclusionCase == 'yes') {
                 $rsyncOptions[] = '--no-i-r';
             }
@@ -392,10 +394,8 @@ class ABHelper
             // Backup all volumes to their relative paths
             $allVolumes = array_merge($appdataVolumes, $externalVolumes);
             foreach ($allVolumes as $volume) {
-                // Convert volume path to relative path (e.g., /mnt/user/appdata/privatebin/ -> mnt/user/appdata/privatebin/)
                 $relativePath = ltrim($volume, '/');
                 $volumeDest = "$backupDir/$relativePath";
-                // Create parent directory for the volume
                 mkdir(dirname($volumeDest), 0755, true);
                 $rsyncCmd = "$rsyncBaseCmd " . escapeshellarg("$volume/") . " " . escapeshellarg($volumeDest);
                 self::backupLog("Executing rsync for volume $volume to $volumeDest: $rsyncCmd", self::LOGLEVEL_DEBUG);
@@ -462,7 +462,7 @@ class ABHelper
         self::backupLog("Backup created (took " . gmdate("H:i:s", time() - $backupTimer) . ")");
 
         if (self::abortRequested()) {
-            if ($abSettings->compression == 'noFolders') {
+            if ($isIncremental || $abSettings->compression == 'noFolders') {
                 exec("rm -rf " . escapeshellarg("$destination/{$container['Name']}"));
             } else {
                 unlink($archiveFile);
@@ -475,7 +475,7 @@ class ABHelper
             self::backupLog("Verifying backup...");
             $verifySuccess = true;
 
-            if ($abSettings->compression == 'noFolders') {
+            if ($isIncremental || $abSettings->compression == 'noFolders') {
                 // Verify all volumes
                 $allVolumes = array_merge($appdataVolumes, $externalVolumes);
                 foreach ($allVolumes as $volume) {
@@ -665,9 +665,10 @@ class ABHelper
      * @param ABSettings $abSettings
      * @param DockerClient $dockerClient
      * @param string $destination
+     * @param bool $isIncremental
      * @return bool
      */
-    public static function doContainerHandling($method, $containerListOverride, $abSettings, $dockerClient, $destination)
+    public static function doContainerHandling($method, $containerListOverride, $abSettings, $dockerClient, $destination, $isIncremental = false)
     {
         $containers = $containerListOverride ?: $dockerClient->getDockerContainers();
         $sortedStopContainers = self::sortContainers($containers, $abSettings->containerOrder, true, true, [], $abSettings);
@@ -705,7 +706,7 @@ class ABHelper
                 foreach ($containerListOverride ? array_reverse($containerListOverride) : $sortedStopContainers as $_container) {
                     foreach (self::resolveContainer($_container, $abSettings, $dockerClient, true) ?: [$_container] as $container) {
                         self::setCurrentContainerName($container);
-                        if (!self::backupContainer($container, $destination, $abSettings, $dockerClient)) {
+                        if (!self::backupContainer($container, $destination, $abSettings, $dockerClient, $isIncremental)) {
                             self::$errorOccured = true;
                         }
                         self::handlePrePostScript($abSettings->postContainerBackupScript, 'post-container', $container['Name']);
@@ -753,7 +754,7 @@ class ABHelper
                     if ($container['isGroup']) {
                         $groupContainers = self::resolveContainer($container, $abSettings, $dockerClient, false);
                         if (!empty($groupContainers)) {
-                            self::doContainerHandling('stopAll', $groupContainers, $abSettings, $dockerClient, $destination);
+                            self::doContainerHandling('stopAll', $groupContainers, $abSettings, $dockerClient, $destination, $isIncremental);
                             self::setCurrentContainerName($container, true);
                         }
                         continue;
@@ -772,7 +773,7 @@ class ABHelper
                         return false;
                     }
 
-                    if (!self::backupContainer($container, $destination, $abSettings, $dockerClient)) {
+                    if (!self::backupContainer($container, $destination, $abSettings, $dockerClient, $isIncremental)) {
                         self::$errorOccured = true;
                     }
 

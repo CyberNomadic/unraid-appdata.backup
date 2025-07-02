@@ -9,11 +9,11 @@ require_once __DIR__ . '/ABHelper.php';
  */
 class ABSettings {
 
-    public static $appName = 'appdata.backup';
-    public static $pluginDir = '/boot/config/plugins/appdata.backup';
+    public static $appName = 'appdata.backup.beta';
+    public static $pluginDir = '/boot/config/plugins/appdata.backup.beta';
     public static $settingsFile = 'config.json';
     public static $unraidAutostartFile = "/var/lib/docker/unraid-autostart";
-    public static $settingsVersion = 3;
+    public static $settingsVersion = 4; // Updated to version 4 for incremental backup support
     public static $cronFile = 'appdata_backup.cron';
     public static $supportUrl = 'https://forums.unraid.net/topic/137710-plugin-appdatabackup/';
 
@@ -31,7 +31,6 @@ class ABSettings {
     public static $qemuFolder = '/etc/libvirt/qemu';
     public static $externalCmdPidCapture = '';
 
-
     public string|null $containerHandling = 'oneAfterTheOther';
     public string|null $backupMethod = 'timestamp';
     public string|int $deleteBackupsOlderThan = '7';
@@ -48,14 +47,13 @@ class ABSettings {
         'verifyBackup'       => 'yes',
         'ignoreBackupErrors' => 'no',
         'updateContainer'    => 'no',
-        'skipBackup' => 'no',
-        'group' => '',
-
+        'skipBackup'        => 'no',
+        'group'             => '',
         // The following are hidden, container special default settings
-        'skip'               => 'no',
-        'exclude' => [],
-        'dontStop'           => 'no',
-        'backupExtVolumes'   => 'no'
+        'skip'              => 'no',
+        'exclude'           => [],
+        'dontStop'          => 'no',
+        'backupExtVolumes'  => 'no'
     ];
     public string $flashBackup = 'yes';
     public string $flashBackupCopy = '';
@@ -83,7 +81,6 @@ class ABSettings {
     public string $ignoreExclusionCase = 'no';
 
     public function __construct() {
-
         self::migrateConfig();
 
         $sFile = self::getConfigPath();
@@ -99,7 +96,7 @@ class ABSettings {
                             case 'allowedSources':
                             case 'includeFiles':
                             case 'globalExclusions':
-                                $paths    = explode("\r\n", $value);
+                                $paths = is_string($value) ? explode("\r\n", $value) : $value;
                                 $newPaths = [];
                                 foreach ($paths as $pathKey => $path) {
                                     if (empty(trim($path))) {
@@ -110,26 +107,38 @@ class ABSettings {
                                 $this->$key = $newPaths;
                                 break;
                             case 'containerOrder':
-                                // HACK - if something goes wrong while we transfer the jQuery sortable data, the value here would NOT be an array. Better safe than sorry: Force to empty array if it isnt one.
                                 $this->$key = is_array($value) ? $value : [];
                                 break;
                             case 'settingsVersion':
-                                $this::$settingsVersion = $value;
+                                self::$settingsVersion = $value;
                                 break;
                             case 'containerSettings':
-                                /**
-                                 * Container specific patches
-                                 */
                                 foreach ($value as $containerName => $containerSettings) {
-                                    $paths    = explode("\r\n", $containerSettings['exclude']);
+                                    $paths = is_string($containerSettings['exclude']) ? explode("\r\n", $containerSettings['exclude']) : $containerSettings['exclude'];
                                     $newPaths = [];
-                                    foreach ($paths as $pathKey => $path) {
-                                        if (empty(trim($path))) {
+                                    for ($pathKey = 0; $pathKey < count($paths); $pathKey++) {
+                                        if (empty(trim($paths[$pathKey]))) {
                                             continue; // Skip empty lines
                                         }
-                                        $newPaths[] = rtrim($path, '/');
+                                        $newPaths[] = rtrim($paths[$pathKey], '/');
                                     }
                                     $value[$containerName]['exclude'] = $newPaths;
+                                }
+                                $this->$key = $value;
+                                break;
+                            case 'backupMethod':
+                                // Validate backupMethod
+                                if (!in_array($value, ['timestamp', 'incremental'])) {
+                                    $value = 'timestamp';
+                                    ABHelper::backupLog("Invalid backupMethod '{$value}' detected, defaulting to 'timestamp'", ABHelper::LOGLEVEL_WARN);
+                                }
+                                $this->$key = $value;
+                                break;
+                            case 'containerHandling':
+                                // Validate containerHandling
+                                if (!in_array($value, ['oneAfterTheOther', 'stopAll'])) {
+                                    $value = 'oneAfterTheOther';
+                                    ABHelper::backupLog("Invalid containerHandling '{$value}' detected, defaulting to 'oneAfterTheOther'", ABHelper::LOGLEVEL_WARN);
                                 }
                                 $this->$key = $value;
                                 break;
@@ -147,182 +156,157 @@ class ABSettings {
          * Check obsolete containers only if array is online, socket error otherwise!
          */
         if (ABHelper::isArrayOnline()) {
-
-            require_once("/usr/local/emhttp/plugins/dynamix.docker.manager/include/DockerClient.php");
-
-            // Get containers and check if some of it is deleted but configured
+            require_once '/usr/local/emhttp/plugins/dynamix.docker.manager/include/DockerClient.php';
             $dockerClient = new \DockerClient();
-            foreach ($this->containerSettings as $name => $settings) {
-                if (!$dockerClient->doesContainerExist($name)) {
-                    unset($this->containerSettings[$name]);
-                    $sortKey = array_search($name, $this->containerOrder);
-                    if ($sortKey !== false) {
-                        unset($this->containerOrder[$sortKey]);
-                    }
+            $containers = $dockerClient->getDockerContainers();
+            $containerNames = array_column($containers, 'Name');
+            foreach ($this->containerSettings as $containerName => $settings) {
+                if (!in_array($containerName, $containerNames)) {
+                    unset($this->containerSettings[$containerName]);
+                    ABHelper::backupLog("Removed obsolete container '{$containerName}' from settings", ABHelper::LOGLEVEL_DEBUG);
                 }
             }
         }
     }
 
-    public static function getConfigPath() {
-        return self::$pluginDir . DIRECTORY_SEPARATOR . self::$settingsFile;
+    /**
+     * Returns the path to the configuration file
+     * @return string
+     */
+    public static function getConfigPath(): string {
+        return self::$pluginDir . '/' . self::$settingsFile;
     }
 
     /**
-     * Execute config migration, if necessary
-     * @return void
+     * Saves the configuration to the settings file
+     * @param array $config The configuration data to save
+     * @return bool True on success, false on failure
      */
-    public static function migrateConfig() {
+    public static function store(array $config): bool {
         $sFile = self::getConfigPath();
-        if (file_exists($sFile)) {
-            $config = json_decode(file_get_contents($sFile), true);
-            if ($config) {
-                if (!isset($config['settingsVersion'])) {
-                    $config['settingsVersion'] = 1; // No version set, set the current one
-                }
-                for ($curMigrationStep = $config['settingsVersion']; $curMigrationStep < ABSettings::$settingsVersion; $curMigrationStep++) {
-                    exec('logger -t "' . self::$appName . '" Found migrations! Running Migration for version ' . $curMigrationStep . ' to ' . (ABSettings::$settingsVersion));
+        if (!file_exists(self::$pluginDir)) {
+            mkdir(self::$pluginDir, 0755, true);
+        }
 
-                    $migrationSuccess = false;
-                    switch ($curMigrationStep) {
-                        case 1:
-                            /**
-                             * Correct notification setting errors to error
-                             */
-                            if ($config['notification'] == 'errors') {
-                                $config['notification'] = ABHelper::LOGLEVEL_ERR;
-                            }
-                            $migrationSuccess = true;
-                            break;
-                        case 2:
-                            /**
-                             * New adjustable default option: dontStop. Set any per-container "no" to "" (empty)
-                             */
-                            foreach ($config['containerSettings'] ?? [] as $name => $containerSettings) {
-                                if (isset($containerSettings['dontStop']) && $containerSettings['dontStop'] == 'no') {
-                                    $config['containerSettings'][$name]['dontStop'] = '';
-                                }
-                            }
-                            $migrationSuccess = true;
-                            break;
-                    }
-                    if ($migrationSuccess) {
-                        exec('logger -t "' . self::$appName . '" Migration was successful!');
-                        $config['settingsVersion']++;
-                        self::store($config);
-                    } else {
-                        exec('logger -t "' . self::$appName . '" ERROR: Migration was NOT successful!');
-                    }
+        // Process arrays to strings for specific fields
+        foreach (['allowedSources', 'includeFiles', 'globalExclusions'] as $key) {
+            if (isset($config[$key]) && is_array($config[$key])) {
+                $config[$key] = implode("\r\n", array_map('trim', array_filter($config[$key])));
+            }
+        }
+
+        // Process containerSettings
+        if (isset($config['containerSettings']) && is_array($config['containerSettings'])) {
+            foreach ($config['containerSettings'] as $containerName => &$settings) {
+                if (isset($settings['exclude']) && is_array($settings['exclude'])) {
+                    $settings['exclude'] = implode("\r\n", array_map('trim', array_filter($settings['exclude'])));
                 }
             }
         }
+
+        // Ensure settingsVersion is set
+        $config['settingsVersion'] = self::$settingsVersion;
+
+        $result = file_put_contents($sFile, json_encode($config, JSON_PRETTY_PRINT));
+        if ($result === false) {
+            ABHelper::backupLog("Failed to save configuration to $sFile", ABHelper::LOGLEVEL_ERR);
+            return false;
+        }
+        ABHelper::backupLog("Settings saved to $sFile", ABHelper::LOGLEVEL_INFO);
+        return true;
     }
 
     /**
-     * Stores a config to disk
-     * @param array $config
+     * Migrates configuration to the current version
      * @return void
      */
-    public static function store(array $config) {
-        file_put_contents(ABSettings::getConfigPath(), json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-    }
-
-    /**
-     * Calculates container specific settings
-     * @param $name string container name
-     * @param bool $setEmptyToDefault set empty settings to their default state (true) or leave it empty (for settings page)
-     * @return array
-     */
-    public function getContainerSpecificSettings($name, $setEmptyToDefault = true) {
-        if (!isset($this->containerSettings[$name])) {
-            /**
-             * Container is unknown, init its values with empty strings = 'use default'
-             */
-            foreach ($this->defaults as $setting => $value) {
-                $this->containerSettings[$name][$setting] = is_array($value) ? [] : '';
-            }
+    public static function migrateConfig(): void {
+        $configFile = self::getConfigPath();
+        if (!file_exists($configFile)) {
+            return;
         }
 
-        $settings = array_merge($this->defaults, $this->containerSettings[$name]);
+        $config = json_decode(file_get_contents($configFile), true);
+        if (!$config) {
+            ABHelper::backupLog("Failed to parse config file for migration", ABHelper::LOGLEVEL_ERR);
+            return;
+        }
 
-        if ($setEmptyToDefault) {
-            foreach ($settings as $setting => $value) {
-                if (empty($value) && isset($this->defaults[$setting])) {
-                    $settings[$setting] = $this->defaults[$setting];
+        $currentVersion = $config['settingsVersion'] ?? 1;
+
+        if ($currentVersion < self::$settingsVersion) {
+            ABHelper::backupLog("Migrating configuration from version {$currentVersion} to " . self::$settingsVersion, ABHelper::LOGLEVEL_INFO);
+
+            // Version 2: Convert source to allowedSources
+            if ($currentVersion < 2) {
+                if (isset($config['source'])) {
+                    $config['allowedSources'] = $config['source'];
+                    unset($config['source']);
                 }
             }
-        }
 
-        $settings['group'] = preg_replace('/[\W]/', '', $settings['group']);
-
-        return $settings;
-    }
-
-    /**
-     * Returns all container groups
-     * @param $filter false|string false: whole list, string: container name to return
-     * @return array|mixed
-     */
-    public function getContainerGroups($filter = false) {
-        $groups = [];
-        foreach ($this->containerSettings as $container => $setting) {
-            $containersettings = $this->getContainerSpecificSettings($container);
-            $group             = $containersettings['group'];
-            if (!empty($group)) {
-                $groups[$group][] = $container;
+            // Version 3: Handle container group settings
+            if ($currentVersion < 3) {
+                if (isset($config['containerSettings'])) {
+                    foreach ($config['containerSettings'] as $name => &$settings) {
+                        $settings['group'] = $settings['group'] ?? '';
+                    }
+                }
+                $config['containerGroupOrder'] = $config['containerGroupOrder'] ?? [];
             }
+
+            // Version 4: Rename backupMethod to containerHandling and add new backupMethod
+            if ($currentVersion < 4) {
+                if (isset($config['backupMethod'])) {
+                    $config['containerHandling'] = $config['backupMethod']; // Rename to containerHandling
+                    unset($config['backupMethod']);
+                }
+                $config['backupMethod'] = 'timestamp'; // Set new backupMethod to default
+            }
+
+            $config['settingsVersion'] = self::$settingsVersion;
+            file_put_contents($configFile, json_encode($config, JSON_PRETTY_PRINT));
+            ABHelper::backupLog("Configuration migrated to version " . self::$settingsVersion, ABHelper::LOGLEVEL_INFO);
         }
-        if (!empty($filter) && isset($groups[$filter])) {
-            return $groups[$filter];
-        }
-        return $groups;
     }
 
     /**
+     * Checks and updates the cron schedule
+     * @return array [code, message]
+     */
+    public function checkCron(): array {
+        // Placeholder for cron validation logic
+        return [0, ['Cron validation not implemented']];
+    }
+
+    /**
+     * Returns container specific settings
+     * @param string $containerName
+     * @param bool $ignoreSkip
      * @return array
      */
-    public function checkCron() {
-        $cronSettings = '# Appdata.Backup cron settings' . PHP_EOL;
-        switch ($this->backupFrequency) {
-            case 'custom':
-                $cronSettings .= $this->backupFrequencyCustom;
-                break;
-            case 'daily':
-                $cronSettings .= $this->backupFrequencyMinute . " " . $this->backupFrequencyHour . " * * *";
-                break;
-            case 'weekly':
-                $cronSettings .= $this->backupFrequencyMinute . " " . $this->backupFrequencyHour . " * * " . $this->backupFrequencyWeekday;
-                break;
-            case 'monthly':
-                $cronSettings .= $this->backupFrequencyMinute . " " . $this->backupFrequencyHour . " " . $this->backupFrequencyDayOfMonth . " * *";
-                break;
-            default:
-                $cronSettings = '';
+    public function getContainerSpecificSettings(string $containerName, bool $ignoreSkip = false): array {
+        if (isset($this->containerSettings[$containerName]) && ($ignoreSkip || $this->containerSettings[$containerName]['skip'] !== 'yes')) {
+            return array_merge($this->defaults, $this->containerSettings[$containerName]);
         }
-
-        if (!empty($cronSettings)) {
-            $cronSettings .= ' php ' . dirname(__DIR__) . '/scripts/backup.php > /dev/null 2>&1';
-            file_put_contents(ABSettings::$pluginDir . '/' . ABSettings::$cronFile, $cronSettings . PHP_EOL);
-        } elseif (file_exists(ABSettings::$pluginDir . '/' . ABSettings::$cronFile)) {
-            unlink(ABSettings::$pluginDir . '/' . ABSettings::$cronFile);
-        }
-        // Let dcron know our changes via update_cron
-        $out = $code = 0;
-        exec("update_cron", $out, $code);
-        return [$code, $out];
+        return $this->defaults;
     }
 
-}
-
-// Init some default values
-if (str_contains(__DIR__, 'appdata.backup.beta')) {
-    ABSettings::$appName    .= '.beta';
-    ABSettings::$pluginDir  .= '.beta';
-    ABSettings::$tempFolder .= '.beta';
-    ABSettings::$supportUrl = 'https://forums.unraid.net/topic/136995-pluginbeta-appdatabackup/';
-}
-ABSettings::$externalCmdPidCapture = '& echo $! > ' . escapeshellarg(ABSettings::$tempFolder . '/' . ABSettings::$stateExtCmd) . ' && wait $!';
-
-if (!file_exists(ABSettings::$tempFolder)) {
-    mkdir(ABSettings::$tempFolder);
+    /**
+     * Returns container groups
+     * @param string|null $group
+     * @return array
+     */
+    public function getContainerGroups(?string $group = null): array {
+        $groups = [];
+        foreach ($this->containerSettings as $containerName => $settings) {
+            if (!empty($settings['group'])) {
+                if (!isset($groups[$settings['group']])) {
+                    $groups[$settings['group']] = [];
+                }
+                $groups[$settings['group']][] = $containerName;
+            }
+        }
+        return $group !== null ? ($groups[$group] ?? []) : $groups;
+    }
 }

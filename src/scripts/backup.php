@@ -26,12 +26,14 @@ class AppdataBackup {
     private $dockerClient;
     private $errorOccurred = false;
     private $updateList = [];
+    private $isIncremental = false;
 
-    public function __construct() {
-        $this->backupStartTime = new DateTime();
-        $this->settings = new ABSettings();
-        $this->dockerClient = new DockerClient();
-    }
+public function __construct() {
+    $this->backupStartTime = new DateTime();
+    $this->settings = new ABSettings();
+    $this->dockerClient = new DockerClient();
+    $this->isIncremental = ($this->settings->backupMethod === 'incremental'); // Set isIncremental based on settings
+}
 
     /**
      * Executes the backup process
@@ -80,10 +82,6 @@ class AppdataBackup {
      * Validates prerequisites before starting backup
      * @throws Exception
      */
-    /**
- * Validates prerequisites before starting backup
- * @throws Exception
- */
 private function validatePrerequisites(): void {
     if (!ABHelper::isArrayOnline()) {
         throw new Exception("Array is not online");
@@ -106,14 +104,10 @@ private function validatePrerequisites(): void {
         throw new Exception("Parent destination directory is not writable: {$parentDestination}");
     }
 
-    // Set the backup destination based on backupMethod
-    if ($this->settings->backupMethod == "timestamp") {
-        $this->destination = $parentDestination . '/ab_' . date('Ymd_His');
-    } else {
-        $this->destination = $parentDestination;
-    }
+    // Set the backup destination based on isIncremental
+    $this->destination = $this->isIncremental ? $parentDestination : $parentDestination . '/ab_' . date('Ymd_His');
 
-    // Create the destination directory if it doesn't exist
+    // Create or verify the destination directory
     if (!file_exists($this->destination)) {
         if (!mkdir($this->destination, 0775, true)) {
             throw new Exception("Failed to create destination directory: {$this->destination}");
@@ -125,6 +119,16 @@ private function validatePrerequisites(): void {
     // Verify the destination directory is writable
     if (!is_writable($this->destination)) {
         throw new Exception("Destination directory is not writable: {$this->destination}");
+    }
+
+    // Check for existing backup for incremental mode
+    if ($this->isIncremental) {
+        $configPath = $this->destination . '/' . ABSettings::$settingsFile;
+        if (file_exists($configPath)) {
+            ABHelper::backupLog("Detected existing backup for incremental update at: {$this->destination}");
+        } else {
+            ABHelper::backupLog("No existing backup found, performing initial backup at: {$this->destination}");
+        }
     }
 
     ABHelper::backupLog("Source paths: " . implode(', ', $this->settings->allowedSources));
@@ -185,8 +189,27 @@ private function validatePrerequisites(): void {
 
         // Backup container XML files
         ABHelper::backupLog("Saving container XML configurations...");
-        foreach (glob("/boot/config/plugins/dockerMan/templates-user/*") as $xmlFile) {
-            copy($xmlFile, $this->destination . '/' . basename($xmlFile));
+        $xmlDestDir = $this->destination . '/docker_xml';
+        if ($this->isIncremental) {
+            if (!file_exists($xmlDestDir)) {
+                mkdir($xmlDestDir, 0775, true);
+            }
+            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " /boot/config/plugins/dockerMan/templates-user/ " . escapeshellarg($xmlDestDir . '/');
+            ABHelper::backupLog("Executing rsync for XML configs: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
+            exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultCode);
+            ABHelper::backupLog("rsync XML output: " . implode('; ', $output), ABHelper::LOGLEVEL_DEBUG);
+            if ($resultCode > 0) {
+                ABHelper::backupLog("Failed to sync XML configurations: " . implode('; ', $output), ABHelper::LOGLEVEL_ERR);
+                $this->errorOccurred = true;
+            }
+        } else {
+            if (!file_exists($xmlDestDir)) {
+                mkdir($xmlDestDir, 0775, true);
+            }
+            foreach (glob("/boot/config/plugins/dockerMan/templates-user/*") as $xmlFile) {
+                copy($xmlFile, $xmlDestDir . '/' . basename($xmlFile));
+            }
         }
 
         if (ABHelper::abortRequested()) {
@@ -200,7 +223,7 @@ private function validatePrerequisites(): void {
         // Execute backup
         $preBackupResult = ABHelper::handlePrePostScript($this->settings->preBackupScript, 'pre-backup', $this->destination);
         if ($preBackupResult !== 2) {
-            ABHelper::doContainerHandling($this->settings->containerHandling, null, $this->settings, $this->dockerClient, $this->destination);
+            ABHelper::doContainerHandling($this->settings->containerHandling, null, $this->settings, $this->dockerClient, $this->destination, $this->isIncremental);
         } else {
             ABHelper::backupLog("Backup skipped by pre-backup script");
         }
@@ -264,19 +287,45 @@ private function validatePrerequisites(): void {
             return;
         }
 
-        if (!copy($docroot . '/' . $output[0], $this->destination . '/' . $output[0])) {
-            ABHelper::backupLog("Failed to copy flash backup to destination", ABHelper::LOGLEVEL_ERR);
-            $this->errorOccurred = true;
-            return;
+        $flashDest = $this->destination . '/' . $output[0];
+        if ($this->isIncremental) {
+            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " " . escapeshellarg($docroot . '/' . $output[0]) . " " . escapeshellarg($this->destination . '/');
+            ABHelper::backupLog("Executing rsync for flash backup: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
+            exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $rsyncOutput, $resultCode);
+            ABHelper::backupLog("rsync flash backup output: " . implode('; ', $rsyncOutput), ABHelper::LOGLEVEL_DEBUG);
+            if ($resultCode > 0) {
+                ABHelper::backupLog("Failed to sync flash backup: " . implode('; ', $rsyncOutput), ABHelper::LOGLEVEL_ERR);
+                $this->errorOccurred = true;
+                return;
+            }
+        } else {
+            if (!copy($docroot . '/' . $output[0], $flashDest)) {
+                ABHelper::backupLog("Failed to copy flash backup to destination", ABHelper::LOGLEVEL_ERR);
+                $this->errorOccurred = true;
+                return;
+            }
         }
 
         ABHelper::backupLog("Flash backup completed");
         
         if (!empty($this->settings->flashBackupCopy)) {
             ABHelper::backupLog("Copying flash backup to {$this->settings->flashBackupCopy}...");
-            if (!copy($docroot . '/' . $output[0], $this->settings->flashBackupCopy . '/' . $output[0])) {
-                ABHelper::backupLog("Failed to copy flash backup to {$this->settings->flashBackupCopy}", ABHelper::LOGLEVEL_ERR);
-                $this->errorOccurred = true;
+            if ($this->isIncremental) {
+                $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+                $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " " . escapeshellarg($docroot . '/' . $output[0]) . " " . escapeshellarg($this->settings->flashBackupCopy . '/');
+                ABHelper::backupLog("Executing rsync for flash backup copy: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
+                exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $rsyncOutput, $resultCode);
+                ABHelper::backupLog("rsync flash backup copy output: " . implode('; ', $rsyncOutput), ABHelper::LOGLEVEL_DEBUG);
+                if ($resultCode > 0) {
+                    ABHelper::backupLog("Failed to sync flash backup to {$this->settings->flashBackupCopy}: " . implode('; ', $rsyncOutput), ABHelper::LOGLEVEL_ERR);
+                    $this->errorOccurred = true;
+                }
+            } else {
+                if (!copy($docroot . '/' . $output[0], $this->settings->flashBackupCopy . '/' . $output[0])) {
+                    ABHelper::backupLog("Failed to copy flash backup to {$this->settings->flashBackupCopy}", ABHelper::LOGLEVEL_ERR);
+                    $this->errorOccurred = true;
+                }
             }
         }
 
@@ -300,15 +349,29 @@ private function validatePrerequisites(): void {
         }
 
         ABHelper::backupLog("Backing up VM metadata...");
-        $output = $resultCode = null;
-        exec("tar -czf " . escapeshellarg($this->destination . '/vm_meta.tgz') . " " . ABSettings::$qemuFolder . '/ ' . ABSettings::$externalCmdPidCapture, $output, $resultCode);
-        
-        ABHelper::backupLog("Tar command output: " . print_r($output, true), ABHelper::LOGLEVEL_DEBUG);
-        if ($resultCode !== 0) {
-            ABHelper::backupLog("Failed to backup VM metadata", ABHelper::LOGLEVEL_ERR);
-            $this->errorOccurred = true;
+        $vmDest = $this->destination . '/vm_meta.tgz';
+        if ($this->isIncremental) {
+            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " " . escapeshellarg(ABSettings::$qemuFolder . '/') . " " . escapeshellarg($this->destination . '/vm_meta/');
+            ABHelper::backupLog("Executing rsync for VM metadata: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
+            exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $rsyncOutput, $resultCode);
+            ABHelper::backupLog("rsync VM metadata output: " . implode('; ', $rsyncOutput), ABHelper::LOGLEVEL_DEBUG);
+            if ($resultCode > 0) {
+                ABHelper::backupLog("Failed to sync VM metadata: " . implode('; ', $rsyncOutput), ABHelper::LOGLEVEL_ERR);
+                $this->errorOccurred = true;
+            } else {
+                ABHelper::backupLog("VM metadata backup completed");
+            }
         } else {
-            ABHelper::backupLog("VM metadata backup completed");
+            $output = $resultCode = null;
+            exec("tar -czf " . escapeshellarg($vmDest) . " " . ABSettings::$qemuFolder . '/ ' . ABSettings::$externalCmdPidCapture, $output, $resultCode);
+            ABHelper::backupLog("Tar command output: " . print_r($output, true), ABHelper::LOGLEVEL_DEBUG);
+            if ($resultCode !== 0) {
+                ABHelper::backupLog("Failed to backup VM metadata", ABHelper::LOGLEVEL_ERR);
+                $this->errorOccurred = true;
+            } else {
+                ABHelper::backupLog("VM metadata backup completed");
+            }
         }
     }
 
@@ -341,41 +404,64 @@ private function validatePrerequisites(): void {
 
         ABHelper::backupLog("Backing up extra files: " . implode(', ', $validFiles), ABHelper::LOGLEVEL_DEBUG);
         
-        $tarOptions = ['-c', '-P'];
-        if (!empty($this->settings->globalExclusions)) {
-            $tarOptions = array_merge(array_map(fn($ex) => '--exclude ' . escapeshellarg($ex), $this->settings->globalExclusions), $tarOptions);
-        }
-
-        if ($this->settings->ignoreExclusionCase === 'yes') {
-            $tarOptions[] = '--ignore-case';
-        }
-
-        $destination = $this->destination . '/extra_files.tar';
-        switch ($this->settings->compression) {
-            case 'yes':
-                $tarOptions[] = '-z';
-                $destination .= '.gz';
-                break;
-            case 'yesMulticore':
-                $tarOptions[] = '-I zstdmt';
-                $destination .= '.zst';
-                break;
-        }
-
-        $tarOptions[] = '-f ' . escapeshellarg($destination);
-        $tarOptions = array_merge($tarOptions, array_map('escapeshellarg', $validFiles));
-        $command = "tar " . implode(" ", $tarOptions);
-
-        ABHelper::backupLog("Executing tar command: {$command}", ABHelper::LOGLEVEL_DEBUG);
-        $output = $resultCode = null;
-        exec("{$command} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultCode);
-
-        ABHelper::backupLog("Tar output: " . implode('; ', $output), ABHelper::LOGLEVEL_DEBUG);
-        if ($resultCode !== 0) {
-            ABHelper::backupLog("Failed to create extra files archive: " . implode('; ', $output), ABHelper::LOGLEVEL_ERR);
-            $this->errorOccurred = true;
+        if ($this->isIncremental) {
+            $extraDestDir = $this->destination . '/extra_files';
+            if (!file_exists($extraDestDir)) {
+                mkdir($extraDestDir, 0775, true);
+            }
+            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            if ($this->settings->ignoreExclusionCase === 'yes') {
+                $rsyncOptions[] = '--no-i-r';
+            }
+            if (!empty($this->settings->globalExclusions)) {
+                $rsyncOptions = array_merge($rsyncOptions, array_map(fn($ex) => '--exclude=' . escapeshellarg($ex), $this->settings->globalExclusions));
+            }
+            $rsyncBaseCmd = "rsync " . implode(" ", $rsyncOptions);
+            foreach ($validFiles as $file) {
+                $relativePath = ltrim($file, '/');
+                $fileDest = "$extraDestDir/$relativePath";
+                mkdir(dirname($fileDest), 0775, true);
+                $rsyncCmd = "$rsyncBaseCmd " . escapeshellarg("$file/") . " " . escapeshellarg($fileDest);
+                ABHelper::backupLog("Executing rsync for extra file $file: $rsyncCmd", ABHelper::LOGLEVEL_DEBUG);
+                exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultCode);
+                ABHelper::backupLog("rsync output: " . implode('; ', $output), ABHelper::LOGLEVEL_DEBUG);
+                if ($resultCode > 0) {
+                    ABHelper::backupLog("rsync failed for extra file $file: " . implode('; ', $output), ABHelper::LOGLEVEL_ERR);
+                    $this->errorOccurred = true;
+                }
+            }
         } else {
-            ABHelper::backupLog("Extra files backup completed");
+            $tarOptions = ['-c', '-P'];
+            if (!empty($this->settings->globalExclusions)) {
+                $tarOptions = array_merge(array_map(fn($ex) => '--exclude=' . escapeshellarg($ex), $this->settings->globalExclusions), $tarOptions);
+            }
+            if ($this->settings->ignoreExclusionCase === 'yes') {
+                $tarOptions[] = '--ignore-case';
+            }
+            $destination = $this->destination . '/extra_files.tar';
+            switch ($this->settings->compression) {
+                case 'yes':
+                    $tarOptions[] = '-z';
+                    $destination .= '.gz';
+                    break;
+                case 'yesMulticore':
+                    $tarOptions[] = '-I zstdmt';
+                    $destination .= '.zst';
+                    break;
+            }
+            $tarOptions[] = '-f ' . escapeshellarg($destination);
+            $tarOptions = array_merge($tarOptions, array_map('escapeshellarg', $validFiles));
+            $command = "tar " . implode(" ", $tarOptions);
+            ABHelper::backupLog("Executing tar command: {$command}", ABHelper::LOGLEVEL_DEBUG);
+            $output = $resultCode = null;
+            exec("{$command} 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultCode);
+            ABHelper::backupLog("Tar output: " . implode('; ', $output), ABHelper::LOGLEVEL_DEBUG);
+            if ($resultCode !== 0) {
+                ABHelper::backupLog("Failed to create extra files archive: " . implode('; ', $output), ABHelper::LOGLEVEL_ERR);
+                $this->errorOccurred = true;
+            } else {
+                ABHelper::backupLog("Extra files backup completed");
+            }
         }
     }
 
@@ -385,6 +471,11 @@ private function validatePrerequisites(): void {
     private function handleRetention(): void {
         if ($this->errorOccurred) {
             ABHelper::backupLog("Skipping retention check due to errors", ABHelper::LOGLEVEL_WARN);
+            return;
+        }
+
+        if ($this->isIncremental) {
+            ABHelper::backupLog("Retention policy skipped for incremental backups", ABHelper::LOGLEVEL_INFO);
             return;
         }
 
@@ -443,8 +534,10 @@ private function validatePrerequisites(): void {
 
         if ($this->errorOccurred) {
             copy(ABSettings::$tempFolder . '/' . ABSettings::$debugLogFile, $this->destination . '/backup.debug.log');
-            rename($this->destination, $this->destination . '-failed');
-            $this->destination .= '-failed';
+            if (!$this->isIncremental) {
+                rename($this->destination, $this->destination . '-failed');
+                $this->destination .= '-failed';
+            }
         }
 
         // Set permissions
