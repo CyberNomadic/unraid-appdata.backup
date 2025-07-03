@@ -565,8 +565,7 @@ if (($code ?? 0) != 0) {
 
     <div class="title"><span class="left"><i class="fa fa-docker title"></i>Docker specific settings</span></div>
 
-    <p><b>General note</b>: This plugin always backup every unknown (new) container with the default settings. In this
-        section you can set settings that deviate from the defaults.</p>
+    <p><b>General note</b>: This plugin backs up every unknown or new container with the global settings. This section allows deviations per container.</p>
 
     <dl>
         <dt><b>Update containers after backup?</b></dt>
