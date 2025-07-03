@@ -265,14 +265,14 @@ if (($code ?? 0) != 0) {
     <dl>
             <dt><b>Backup Method</b></dt>
             <dd>
-                <select id="backupMethod" name="backupMethod" data-setting="<?= $abSettings->backupMethod ?>">
+                <select id="backupMethod" name="backupMethod" onchange="checkBackupMethod();" data-setting="<?= $abSettings->backupMethod ?>">
                     <option value="timestamp">Timestamp</option>
                     <option value="incremental">Incremental</option>
                 </select>
             </dd>
     </dl>
 
-    <dl>
+    <dl id="timestampBackupHandler_dl" style="display: none;">
 
         <dt><b>Delete backups if older than x days:</b></dt>
         <dd><input id='deleteBackupsOlderThan' name="deleteBackupsOlderThan" type='number'
@@ -283,7 +283,9 @@ if (($code ?? 0) != 0) {
         <dd><input id='keepMinBackups' name="keepMinBackups" type='number' value='<?= $abSettings->keepMinBackups ?>'
                    placeholder='Leave empty to disable'/></dd>
 
+    </dl>
 
+    <dl>
         <dt><b>Appdata source(s)</b> Please note the infos inside help block!</dt>
         <dd>
             <div style="display: table; width: 300px;"><textarea required id="allowedSources" name="allowedSources"
@@ -1057,6 +1059,20 @@ HTML;
                 break;
             default:
                 $('#backupFrequencyCustom').prop('disabled', false);
+                break;
+        }
+    }
+
+     function checkBackupMethod() {
+        switch ($('#backupMethod').val()) {
+            case 'incremental':
+                //Commented for now, not required but values can be retained.
+                //$('#deleteBackupsOlderThan').val('');
+                //$('#keepMinBackups').val('');
+                $('#timestampBackupHandler_dl').fadeOut();
+                break;
+            case 'timestamp':
+                $('#timestampBackupHandler_dl').fadeIn();
                 break;
         }
     }
