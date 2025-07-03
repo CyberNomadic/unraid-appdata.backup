@@ -376,8 +376,8 @@ class ABHelper
         $backupTimer = time();
         $success = true;
 
-        if ($isIncremental || $abSettings->compression == 'noFolders') {
-            // Use rsync for incremental backups or noFolders compression
+        if ($isIncremental) {
+            // Use rsync for incremental backups
             $backupDir = "$destination/{$container['Name']}";
             if (!file_exists($backupDir)) {
                 mkdir($backupDir, 0755, true);
@@ -462,7 +462,7 @@ class ABHelper
         self::backupLog("Backup created (took " . gmdate("H:i:s", time() - $backupTimer) . ")");
 
         if (self::abortRequested()) {
-            if ($isIncremental || $abSettings->compression == 'noFolders') {
+            if ($isIncremental) {
                 exec("rm -rf " . escapeshellarg("$destination/{$container['Name']}"));
             } else {
                 unlink($archiveFile);
@@ -475,7 +475,7 @@ class ABHelper
             self::backupLog("Verifying backup...");
             $verifySuccess = true;
 
-            if ($isIncremental || $abSettings->compression == 'noFolders') {
+            if ($isIncremental) {
                 // Verify all volumes
                 $allVolumes = array_merge($appdataVolumes, $externalVolumes);
                 foreach ($allVolumes as $volume) {
