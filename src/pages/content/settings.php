@@ -376,7 +376,7 @@ if (($code ?? 0) != 0) {
 
     <dl id="flashBackupCopy_dl">
         <dt>
-            <div style="display: table; line-height: 1em;"><b>Copy the flash backup to a custom destination</b><br/>This
+            <div style="line-height: 1em;"><b>Copy the flash backup to a custom destination</b><br/>This
                 is optional
             </div>
         </dt>
