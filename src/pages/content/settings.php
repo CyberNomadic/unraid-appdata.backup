@@ -273,7 +273,14 @@ if (($code ?? 0) != 0) {
     </dl>
 
     <dl id="timestampBackupHandler_dl" style="display: none;">
-
+        <dt><b>Compression:</b></dt>
+        <dd><select id='compression' name="compression" data-setting="<?= $abSettings->compression ?>"
+                    onchange="checkMultiCoreCpuCount();">
+                <option value='no'>No</option> 
+                <option value='yes'>Yes (Normal / Gzip)</option>
+                <option value='yesMulticore'>Yes (Multicore / Zstd)</option>
+            </select>
+        </dd>
         <dt><b>Delete backups if older than x days:</b></dt>
         <dd><input id='deleteBackupsOlderThan' name="deleteBackupsOlderThan" type='number'
                    value='<?= $abSettings->deleteBackupsOlderThan ?>'
@@ -325,15 +332,6 @@ if (($code ?? 0) != 0) {
                    value="<?= $abSettings->destination ?>"
                    data-pickfilter="HIDE_FILES_FILTER" data-pickfolders="true"></dd>
 
-        <dt><b>Use Compression?</b></dt>
-        <dd><select id='compression' name="compression" data-setting="<?= $abSettings->compression ?>"
-                    onchange="checkMultiCoreCpuCount();">
-                <option value='no'>No (Tarball)</option>
-                <option value='noFolders'>No (Folders)</option>    
-                <option value='yes'>Yes (Normal)</option>
-                <option value='yesMulticore'>Yes (Multicore)</option>
-            </select>
-        </dd>
     </dl>
 
     <dl id="compressionCpuLimit_dl">
