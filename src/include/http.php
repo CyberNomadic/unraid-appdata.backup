@@ -25,9 +25,6 @@ if (isset($_GET['action'])) {
             $data = [
                 'running' => ABHelper::scriptRunning(),
                 'log'     => $log,
-                'appName' => ABSettings::$appName,
-                'pluginDir' => ABSettings::$pluginDir,
-                'tempFolder' => ABSettings::$tempFolder,
             ];
 
             echo json_encode($data);
