@@ -71,11 +71,26 @@ class ABSettings {
     public string $successLogWanted = 'no';
     public string $updateLogWanted = 'no';
     public string $ignoreExclusionCase = 'no';
+    private static $initialized = false;
+    /**
+     * Static initialization for beta settings
+     */
+    public static function initialize(): void {
+        if (self::$initialized) {
+            return;
+        }
+        self::$initialized = true;
 
-
+        // Beta detection
+        if (str_contains(__DIR__, 'appdata.backup.beta')) {
+            self::$appName = str_ends_with(self::$appName, '.beta') ? self::$appName : self::$appName . '.beta';
+            self::$pluginDir = str_ends_with(self::$pluginDir, '.beta') ? self::$pluginDir : self::$pluginDir . '.beta';
+            self::$tempFolder = str_ends_with(self::$tempFolder, '.beta') ? self::$tempFolder : self::$tempFolder . '.beta';
+            self::$supportUrl = 'https://forums.unraid.net/topic/136995-pluginbeta-appdatabackup/';
+            ABHelper::backupLog("DEBUG: Running beta version, appName = " . self::$appName . ", pluginDir = " . self::$pluginDir . ", tempFolder = " . self::$tempFolder);
+        }
+    }
     public function __construct() {
-        // Initialize beta settings
-        self::initializeBetaSettings();
 
         // Load and migrate config
         self::migrateConfig();
@@ -312,26 +327,6 @@ class ABSettings {
         }
         return $group !== null ? ($groups[$group] ?? []) : $groups;
     }
-        /**
-     * Initializes beta-specific settings if running in beta mode
-     * @return void
-     */
-   private static function initializeBetaSettings(): void {
-    if (str_contains(__DIR__, 'appdata.backup.beta')) {
-        self::$appName = str_ends_with(self::$appName, '.beta') ? self::$appName : self::$appName . '.beta';
-        self::$pluginDir = str_ends_with(self::$pluginDir, '.beta') ? self::$pluginDir : self::$pluginDir . '.beta';
-        self::$tempFolder = str_ends_with(self::$tempFolder, '.beta') ? self::$tempFolder : self::$tempFolder . '.beta';
-        self::$supportUrl = 'https://forums.unraid.net/topic/136995-pluginbeta-appdatabackup/';
-        ABHelper::backupLog("DEBUG: Running beta version, appName = " . self::$appName . ", pluginDir = " . self::$pluginDir . ", tempFolder = " . self::$tempFolder);
-    }
-
-    // Initialize externalCmdPidCapture
-    self::$externalCmdPidCapture = '& echo $! > ' . escapeshellarg(self::$tempFolder . '/' . self::$stateExtCmd) . ' && wait $!';
-
-    // Create temp folder if it doesn't exist
-    if (!file_exists(self::$tempFolder)) {
-        mkdir(self::$tempFolder, 0755, true);
-        ABHelper::backupLog("DEBUG: Created temp folder: " . self::$tempFolder);
-    }
 }
-}
+//Temporary fix for beta handling so http doesn't have to be modified
+ABSettings::initialize();
