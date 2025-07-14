@@ -384,7 +384,7 @@ class ABHelper
             }
             self::backupLog("Backing up {$container['Name']} using rsync...");
 
-            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncOptions = ['-a', '--copy-links', '--numeric-ids', '--stats', '--delete'];
             if ($abSettings->ignoreExclusionCase == 'yes') {
                 $rsyncOptions[] = '--no-i-r';
             }
@@ -396,7 +396,7 @@ class ABHelper
             foreach ($allVolumes as $volume) {
                 $relativePath = ltrim($volume, '/');
                 $volumeDest = "$backupDir/$relativePath";
-                mkdir(dirname($volumeDest), 0755, true);
+                is_dir(dirname($volumeDest))?: mkdir(dirname($volumeDest), 0755, true);
                 $rsyncCmd = "$rsyncBaseCmd " . escapeshellarg("$volume/") . " " . escapeshellarg($volumeDest);
                 self::backupLog("Executing rsync for volume $volume to $volumeDest: $rsyncCmd", self::LOGLEVEL_DEBUG);
                 exec("$rsyncCmd 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultcode);

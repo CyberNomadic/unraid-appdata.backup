@@ -194,7 +194,7 @@ private function validatePrerequisites(): void {
             if (!file_exists($xmlDestDir)) {
                 mkdir($xmlDestDir, 0775, true);
             }
-            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncOptions = ['-a', '--copy-links', '--numeric-ids', '--stats', '--delete'];
             $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " /boot/config/plugins/dockerMan/templates-user/ " . escapeshellarg($xmlDestDir . '/');
             ABHelper::backupLog("Executing rsync for XML configs: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
             exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $output, $resultCode);
@@ -289,7 +289,7 @@ private function validatePrerequisites(): void {
 
         $flashDest = $this->destination . '/' . $output[0];
         if ($this->isIncremental) {
-            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncOptions = ['-a', '--copy-links', '--numeric-ids', '--stats', '--delete'];
             $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " " . escapeshellarg($docroot . '/' . $output[0]) . " " . escapeshellarg($this->destination . '/');
             ABHelper::backupLog("Executing rsync for flash backup: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
             exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $rsyncOutput, $resultCode);
@@ -312,7 +312,7 @@ private function validatePrerequisites(): void {
         if (!empty($this->settings->flashBackupCopy)) {
             ABHelper::backupLog("Copying flash backup to {$this->settings->flashBackupCopy}...");
             if ($this->isIncremental) {
-                $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+                $rsyncOptions = ['-a', '--copy-links', '--numeric-ids', '--stats', '--delete'];
                 $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " " . escapeshellarg($docroot . '/' . $output[0]) . " " . escapeshellarg($this->settings->flashBackupCopy . '/');
                 ABHelper::backupLog("Executing rsync for flash backup copy: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
                 exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $rsyncOutput, $resultCode);
@@ -351,7 +351,7 @@ private function validatePrerequisites(): void {
         ABHelper::backupLog("Backing up VM metadata...");
         $vmDest = $this->destination . '/vm_meta.tgz';
         if ($this->isIncremental) {
-            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncOptions = ['-a', '--copy-links', '--numeric-ids', '--stats', '--delete'];
             $rsyncCmd = "rsync " . implode(" ", $rsyncOptions) . " " . escapeshellarg(ABSettings::$qemuFolder . '/') . " " . escapeshellarg($this->destination . '/vm_meta/');
             ABHelper::backupLog("Executing rsync for VM metadata: {$rsyncCmd}", ABHelper::LOGLEVEL_DEBUG);
             exec($rsyncCmd . " 2>&1 " . ABSettings::$externalCmdPidCapture, $rsyncOutput, $resultCode);
@@ -409,7 +409,7 @@ private function validatePrerequisites(): void {
             if (!file_exists($extraDestDir)) {
                 mkdir($extraDestDir, 0775, true);
             }
-            $rsyncOptions = ['-a', '--no-links', '--safe-links', '--stats', '--delete'];
+            $rsyncOptions = ['-a', '--copy-links', '--numeric-ids', '--stats', '--delete'];
             if ($this->settings->ignoreExclusionCase === 'yes') {
                 $rsyncOptions[] = '--no-i-r';
             }
